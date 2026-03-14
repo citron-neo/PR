@@ -24,7 +24,7 @@ jobs:
       - name: Get upstream commit hash
         id: upstream
         run: |
-          REPO_URL="https://git.citron-emu.org/Citron/Emulator.git"
+          REPO_URL="https://github.com/citron-neo/emulator.git"
           FULL_HASH=$(git ls-remote "$REPO_URL" HEAD | cut -f1)
           SHORT_HASH=$(echo "$FULL_HASH" | cut -c1-7)
           echo "hash_short=$SHORT_HASH" >> $GITHUB_OUTPUT
@@ -105,7 +105,7 @@ jobs:
       - name: Clone Citron Source Code
         shell: bash
         run: |
-          REPO_URL="https://git.citron-emu.org/Citron/Emulator.git"
+          REPO_URL="https://github.com/citron-neo/emulator.git"
           
           ATTEMPT=0
           MAX_ATTEMPTS=999
@@ -117,7 +117,7 @@ jobs:
             # 1. CRITICAL: Wipe the directory before every attempt
             rm -rf emulator
 
-            if git clone --recursive "https://git.citron-emu.org/Citron/Emulator.git" emulator; then
+            if git clone --recursive "https://github.com/citron-neo/emulator.git" emulator; then
               echo "✅ Clone successful on attempt $ATTEMPT."
               exit 0
             fi
@@ -183,7 +183,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Checkout Upstream Repository
-        run: git clone https://git.citron-emu.org/Citron/Emulator.git upstream_repo
+        run: git clone https://github.com/citron-neo/emulator.git upstream_repo
 
       - name: Set Version
         id: version
@@ -218,7 +218,7 @@ jobs:
             *.AppImage*
             *.tar.zst
           body: |
-            **Citron Upstream Commit:** [`${{ needs.check-version.outputs.new_hash }}`](https://git.citron-emu.org/Citron/Emulator/commit/${{ needs.check-version.outputs.new_hash_full }})
+            **Citron Upstream Commit:** [`${{ needs.check-version.outputs.new_hash }}`](https://github.com/citron-neo/emulator/commit/${{ needs.check-version.outputs.new_hash_full }})
 
             This build is based on the latest Citron emulator source code from the upstream repository.
 

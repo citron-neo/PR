@@ -23,7 +23,7 @@ jobs:
       - name: Get upstream commit hash
         id: upstream
         run: |
-          REPO_URL="https://git.citron-emu.org/Citron/Emulator.git"
+          REPO_URL="https://github.com/citron-neo/emulator.git"
           FULL_HASH=$(git ls-remote "$REPO_URL" HEAD | cut -f1)
           SHORT_HASH=$(echo "$FULL_HASH" | cut -c1-7)
           echo "hash_short=$SHORT_HASH" >> $GITHUB_OUTPUT
@@ -86,7 +86,7 @@ jobs:
             rm -rf citron
             
             # Clone without shallow options to ensure all submodule commits are accessible
-            if git clone "https://git.citron-emu.org/Citron/Emulator.git" citron; then
+            if git clone "https://github.com/citron-neo/emulator.git" citron; then
               echo "✅ Clone successful on attempt $ATTEMPT."
               break
             fi
@@ -340,7 +340,7 @@ jobs:
           prerelease: true
           files: "*.dmg"
           body: |
-            **Citron Upstream Commit:** [`${{ needs.check-version.outputs.new_hash }}`](https://git.citron-emu.org/Citron/Emulator/commit/${{ needs.check-version.outputs.new_hash_full }})
+            **Citron Upstream Commit:** [`${{ needs.check-version.outputs.new_hash }}`](https://github.com/citron-neo/emulator/commit/${{ needs.check-version.outputs.new_hash_full }})
             This build is based on the latest Citron emulator source code from the upstream repository.
             **Build Details:**
             - Platform: macOS (Universal)
