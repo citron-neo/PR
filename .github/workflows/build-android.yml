@@ -7,7 +7,12 @@ on:
   pull_request:
     branches-ignore:
       - main
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      target_branch:
+        description: "Upstream citron-neo/emulator branch to build"
+        required: false
+        type: string
   schedule:
     - cron: "0 12 * * *"
 
@@ -29,16 +34,24 @@ jobs:
         id: branch_check
         run: |
           REPO_URL="https://github.com/citron-neo/emulator.git"
-          FEATURE="NULL"
+          if [ -n "${{ inputs.target_branch }}" ]; then
+            CANDIDATE_BRANCH="${{ inputs.target_branch }}"
+          elif [ "${{ github.event_name }}" = "pull_request" ]; then
+            CANDIDATE_BRANCH="${{ github.event.pull_request.head.ref }}"
+          elif [ "${{ github.event_name }}" = "push" ]; then
+            CANDIDATE_BRANCH="${{ github.ref_name }}"
+          else
+            CANDIDATE_BRANCH="main"
+          fi
 
-          if git ls-remote --heads "$REPO_URL" "$FEATURE" | grep -q "$FEATURE"; then
-            BRANCH_NAME="$FEATURE"
-            FULL_HASH=$(git ls-remote "$REPO_URL" "$FEATURE" | cut -f1)
-            echo "✅ Using feature branch: $BRANCH_NAME"
+          if [ -n "$CANDIDATE_BRANCH" ] && git ls-remote --heads "$REPO_URL" "$CANDIDATE_BRANCH" | grep -q "$CANDIDATE_BRANCH"; then
+            BRANCH_NAME="$CANDIDATE_BRANCH"
+            FULL_HASH=$(git ls-remote "$REPO_URL" "refs/heads/$BRANCH_NAME" | cut -f1 | head -n1)
+            echo "✅ Using upstream branch: $BRANCH_NAME"
           else
             BRANCH_NAME="main"
             FULL_HASH=$(git ls-remote "$REPO_URL" HEAD | cut -f1)
-            echo "⚠️ Feature branch not found, falling back to: $BRANCH_NAME"
+            echo "⚠️ Upstream branch '$CANDIDATE_BRANCH' not found, falling back to: $BRANCH_NAME"
           fi
 
           SHORT_HASH=$(echo "$FULL_HASH" | cut -c1-7)
@@ -47,6 +60,23 @@ jobs:
           echo "hash_full=$FULL_HASH" >> $GITHUB_OUTPUT
           echo "hash(short): $SHORT_HASH"
           echo "hash(full):   $FULL_HASH"
+
+      - name: Check if branch commit already built
+        id: built_check
+        run: |
+          BRANCH="${{ steps.branch_check.outputs.branch_name }}"
+          HASH="${{ steps.branch_check.outputs.hash_full }}"
+          WORKFLOW_FILE="build-android.yml"
+
+          COUNT=$(gh api "repos/${{ github.repository }}/actions/workflows/${WORKFLOW_FILE}/runs?branch=${BRANCH}&status=success&per_page=100" --jq "[.workflow_runs[] | select(.head_sha == \"${HASH}\") | select(.id != ${{ github.run_id }})] | length")
+
+          if [ "$COUNT" -gt 0 ]; then
+            echo "already_built=true" >> $GITHUB_OUTPUT
+          else
+            echo "already_built=false" >> $GITHUB_OUTPUT
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Get upstream commit hash
         id: upstream
@@ -79,9 +109,12 @@ jobs:
       - name: Compare versions
         id: compare
         run: |
-          if [ "${{ github.event_name }}" = "push" ]; then
+          if [ "${{ steps.built_check.outputs.already_built }}" = "true" ]; then
+            echo "should_build=false" >> $GITHUB_OUTPUT
+            echo "⏭️ Branch commit already built - skipping"
+          elif [ "${{ github.event_name }}" = "push" ] || [ "${{ github.event_name }}" = "pull_request" ] || [ -n "${{ inputs.target_branch }}" ]; then
             echo "should_build=true" >> $GITHUB_OUTPUT
-            echo "✅ Push event detected - will build"
+            echo "✅ Push/PR event detected - will build"
           elif [ "${{ steps.upstream.outputs.hash_short }}" != "${{ steps.last_built.outputs.last_hash }}" ]; then
             echo "should_build=true" >> $GITHUB_OUTPUT
             echo "✅ New version detected - will build"
@@ -107,7 +140,7 @@ jobs:
         shell: bash
         run: |
           REPO_URL="https://github.com/citron-neo/emulator.git"
-          FEATURE="feature/android-game-file-extraction"
+          TARGET_BRANCH="${{ needs.check-version.outputs.branch_name }}"
           
           ATTEMPT=0
           MAX_ATTEMPTS=999
@@ -119,18 +152,10 @@ jobs:
             # 1. CRITICAL: Wipe the directory before every attempt
             rm -rf citron_source
 
-            if [ "${{ needs.check-version.outputs.branch_name }}" = "$FEATURE" ]; then
-              echo "🌿 Cloning feature branch: ${{ needs.check-version.outputs.branch_name }}"
-              if git clone --recurse-submodules --shallow-submodules --depth 1 -b "$FEATURE" "$REPO_URL" citron_source; then
-                echo "✅ Clone successful."
-                exit 0
-              fi
-            else
-              echo "📦 Cloning main branch"
-              if git clone --recurse-submodules --shallow-submodules --depth 1 "$REPO_URL" citron_source; then
-                echo "✅ Clone successful."
-                exit 0
-              fi
+            echo "🌿 Cloning branch: $TARGET_BRANCH"
+            if git clone --recurse-submodules --shallow-submodules --depth 1 -b "$TARGET_BRANCH" "$REPO_URL" citron_source; then
+              echo "✅ Clone successful."
+              exit 0
             fi
 
             echo "⚠️ Clone failed. Retrying in 15 seconds..."
@@ -234,7 +259,7 @@ jobs:
         shell: bash
         run: |
           REPO_URL="https://github.com/citron-neo/emulator.git"
-          FEATURE="feature/android-game-file-extraction"
+          TARGET_BRANCH="${{ needs.check-version.outputs.branch_name }}"
           
           ATTEMPT=0
           MAX_ATTEMPTS=999
@@ -246,18 +271,10 @@ jobs:
             # 1. CRITICAL: Wipe the directory before every attempt
             rm -rf citron_source
 
-            if [ "${{ needs.check-version.outputs.branch_name }}" = "$FEATURE" ]; then
-              echo "🌿 Cloning feature branch: ${{ needs.check-version.outputs.branch_name }}"
-              if git clone --recurse-submodules --shallow-submodules --depth 1 -b "$FEATURE" "$REPO_URL" citron_source; then
-                echo "✅ Clone successful."
-                exit 0
-              fi
-            else
-              echo "📦 Cloning main branch"
-              if git clone --recurse-submodules --shallow-submodules --depth 1 "$REPO_URL" citron_source; then
-                echo "✅ Clone successful."
-                exit 0
-              fi
+            echo "🌿 Cloning branch: $TARGET_BRANCH"
+            if git clone --recurse-submodules --shallow-submodules --depth 1 -b "$TARGET_BRANCH" "$REPO_URL" citron_source; then
+              echo "✅ Clone successful."
+              exit 0
             fi
 
             echo "⚠️ Clone failed. Retrying in 15 seconds..."
