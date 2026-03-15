@@ -34,11 +34,12 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          REPO="${{ github.repository }}"
           while IFS= read -r BRANCH; do
             [ -z "$BRANCH" ] && continue
             echo "Dispatching builds for upstream branch: $BRANCH"
-            gh workflow run build-windows.yml --ref main -f target_branch="$BRANCH"
-            gh workflow run build-linux.yml --ref main -f target_branch="$BRANCH"
-            gh workflow run build-android.yml --ref main -f target_branch="$BRANCH"
-            gh workflow run build-macos.yml --ref main -f target_branch="$BRANCH"
+            gh workflow run build-windows.yml -R "$REPO" --ref main -f target_branch="$BRANCH"
+            gh workflow run build-linux.yml -R "$REPO" --ref main -f target_branch="$BRANCH"
+            gh workflow run build-android.yml -R "$REPO" --ref main -f target_branch="$BRANCH"
+            gh workflow run build-macos.yml -R "$REPO" --ref main -f target_branch="$BRANCH"
           done < branches.txt
