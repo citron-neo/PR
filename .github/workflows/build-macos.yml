@@ -5,6 +5,12 @@ concurrency:
   cancel-in-progress: true
 
 on:
+  push:
+    branches-ignore:
+      - main
+  pull_request:
+    branches-ignore:
+      - main
   schedule:
     - cron: "0 14 * * *"
   workflow_dispatch: {}
@@ -47,7 +53,9 @@ jobs:
       - name: Compare versions
         id: compare
         run: |
-          if [ "${{ steps.upstream.outputs.hash_short }}" != "${{ steps.last_built.outputs.last_hash }}" ]; then
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "should_build=true" >> $GITHUB_OUTPUT
+          elif [ "${{ steps.upstream.outputs.hash_short }}" != "${{ steps.last_built.outputs.last_hash }}" ]; then
             echo "should_build=true" >> $GITHUB_OUTPUT
           elif [ "${{ steps.release_check.outputs.exists }}" != "true" ]; then
             echo "should_build=true" >> $GITHUB_OUTPUT

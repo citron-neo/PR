@@ -1,7 +1,13 @@
 name: Build Citron (Android)
 
 on:
-  workflow_dispatch:
+  push:
+    branches-ignore:
+      - main
+  pull_request:
+    branches-ignore:
+      - main
+  workflow_dispatch: {}
   schedule:
     - cron: "0 12 * * *"
 
@@ -73,7 +79,10 @@ jobs:
       - name: Compare versions
         id: compare
         run: |
-          if [ "${{ steps.upstream.outputs.hash_short }}" != "${{ steps.last_built.outputs.last_hash }}" ]; then
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "should_build=true" >> $GITHUB_OUTPUT
+            echo "✅ Push event detected - will build"
+          elif [ "${{ steps.upstream.outputs.hash_short }}" != "${{ steps.last_built.outputs.last_hash }}" ]; then
             echo "should_build=true" >> $GITHUB_OUTPUT
             echo "✅ New version detected - will build"
           elif [ "${{ steps.release_check.outputs.exists }}" != "true" ]; then
@@ -374,7 +383,7 @@ jobs:
   release-android:
     name: "Release Android Nightly"
     needs: [check-version, build-android, build-android-8elite]
-    if: needs.check-version.outputs.should_build == 'true'
+    if: needs.check-version.outputs.should_build == 'true' && github.ref_name == 'main'
     permissions:
       contents: write
     runs-on: ubuntu-latest
