@@ -1,7 +1,7 @@
 name: Build Citron (macOS)
 
 concurrency:
-  group: build-macos-nightly-${{ github.ref }}
+  group: build-macos-nightly-${{ inputs.target_branch || github.event.pull_request.head.ref || github.ref }}
   cancel-in-progress: true
 
 on:

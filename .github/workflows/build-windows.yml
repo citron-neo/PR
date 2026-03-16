@@ -1,7 +1,7 @@
 name: Build Citron (Windows)
 
 concurrency:
-  group: build-windows-nightly-${{ github.ref }}
+  group: build-windows-nightly-${{ inputs.target_branch || github.event.pull_request.head.ref || github.ref }}
   cancel-in-progress: true
 
 on:
