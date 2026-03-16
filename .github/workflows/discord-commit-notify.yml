@@ -19,43 +19,90 @@ jobs:
   notify-discord:
     runs-on: ubuntu-latest
     steps:
-      - name: Build notification message
+      - name: Build Discord payload
         shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REPO: ${{ github.repository }}
+          SERVER_URL: ${{ github.server_url }}
+          SHA: ${{ github.sha }}
+          REF_NAME: ${{ github.ref_name }}
+          PUSH_AUTHOR: ${{ github.event.head_commit.author.name }}
+          PUSH_MESSAGE: ${{ github.event.head_commit.message }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
-          if [ "${{ github.event_name }}" = "push" ]; then
-            SHORT_SHA="${GITHUB_SHA::7}"
-            printf "%s\n" \
-              "🌿 **Branch Commit**" \
-              "Repository: \`${{ github.repository }}\`" \
-              "Branch: \`${{ github.ref_name }}\`" \
-              "Author: ${{ github.event.head_commit.author.name }}" \
-              "Commit: [\`${SHORT_SHA}\`](${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }})" \
-              "Message: ${{ github.event.head_commit.message }}" \
-              > message.txt
-          else
-            HEAD_SHA="${{ github.event.pull_request.head.sha }}"
-            SHORT_SHA="${HEAD_SHA::7}"
-            printf "%s\n" \
-              "🔀 **Pull Request Commit Update**" \
-              "Repository: \`${{ github.repository }}\`" \
-              "PR: [#${{ github.event.pull_request.number }} ${{ github.event.pull_request.title }}](${{ github.event.pull_request.html_url }})" \
-              "Source Branch: \`${{ github.event.pull_request.head.ref }}\`" \
-              "Target Branch: \`${{ github.event.pull_request.base.ref }}\`" \
-              "Latest Commit: [\`${SHORT_SHA}\`](${{ github.server_url }}/${{ github.repository }}/commit/${{ github.event.pull_request.head.sha }})" \
-              > message.txt
-          fi
+          python3 - <<'PY'
+          import json
+          import os
+          from datetime import datetime, timezone
+
+          event = os.getenv("EVENT_NAME", "")
+          repo = os.getenv("REPO", "")
+          server_url = os.getenv("SERVER_URL", "")
+
+          if event == "pull_request":
+              pr_number = os.getenv("PR_NUMBER", "")
+              pr_title = os.getenv("PR_TITLE", "")
+              pr_url = os.getenv("PR_URL", "")
+              head_ref = os.getenv("PR_HEAD_REF", "")
+              base_ref = os.getenv("PR_BASE_REF", "")
+              head_sha = os.getenv("PR_HEAD_SHA", "")
+              author = os.getenv("PR_AUTHOR", "")
+              short_sha = head_sha[:7] if head_sha else ""
+              commit_url = f"{server_url}/{repo}/commit/{head_sha}" if head_sha else ""
+
+              payload = {
+                  "embeds": [
+                      {
+                          "title": f"PR #{pr_number}: {pr_title}",
+                          "url": pr_url,
+                          "description": "Pull request received a new commit update.",
+                          "color": 3447003,
+                          "fields": [
+                              {"name": "Repository", "value": repo or "N/A", "inline": True},
+                              {"name": "Author", "value": author or "N/A", "inline": True},
+                              {"name": "Branches", "value": f"`{head_ref}` -> `{base_ref}`", "inline": False},
+                              {
+                                  "name": "Latest Commit",
+                                  "value": f"[`{short_sha}`]({commit_url})" if short_sha and commit_url else "N/A",
+                                  "inline": False,
+                              },
+                          ],
+                          "timestamp": datetime.now(timezone.utc).isoformat(),
+                      }
+                  ]
+              }
+          else:
+              sha = os.getenv("SHA", "")
+              short_sha = sha[:7] if sha else ""
+              ref_name = os.getenv("REF_NAME", "")
+              author = os.getenv("PUSH_AUTHOR", "")
+              message = os.getenv("PUSH_MESSAGE", "")
+              commit_url = f"{server_url}/{repo}/commit/{sha}" if sha else ""
+              content = (
+                  "🌿 **Branch Commit**\n"
+                  f"Repository: `{repo}`\n"
+                  f"Branch: `{ref_name}`\n"
+                  f"Author: {author}\n"
+                  f"Commit: [`{short_sha}`]({commit_url})\n"
+                  f"Message: {message}"
+              )
+              payload = {"content": content}
+
+          with open("payload.json", "w", encoding="utf-8") as f:
+              json.dump(payload, f, ensure_ascii=False)
+          PY
 
       - name: Post message to Discord webhook
         shell: bash
         run: |
-          PAYLOAD=$(python3 - <<'PY'
-          import json
-          from pathlib import Path
-          message = Path("message.txt").read_text(encoding="utf-8")
-          print(json.dumps({"content": message}))
-          PY
-          )
           curl -sS -H "Content-Type: application/json" \
             -X POST \
-            -d "$PAYLOAD" \
+            --data "@payload.json" \
             "${{ secrets.DISCORD_WEBHOOK }}"

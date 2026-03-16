@@ -1,4 +1,4 @@
-name: Schedule Upstream Branch Builds
+name: Schedule Upstream Open PR Builds
 
 on:
   schedule:
@@ -16,17 +16,17 @@ jobs:
       - name: Discover upstream branches
         id: discover
         shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          REPO_URL="https://github.com/citron-neo/emulator.git"
-          git ls-remote --heads "$REPO_URL" \
-            | awk '{print $2}' \
-            | sed 's|refs/heads/||' \
-            | grep -v '^main$' \
+          gh api "repos/citron-neo/emulator/pulls?state=open&per_page=100" \
+            --jq '.[] | select(.head.repo.full_name == "citron-neo/emulator") | .head.ref' \
+            | sort -u \
             > branches.txt
 
           COUNT=$(wc -l < branches.txt | tr -d ' ')
           echo "count=$COUNT" >> $GITHUB_OUTPUT
-          echo "Discovered $COUNT upstream non-main branches."
+          echo "Discovered $COUNT upstream open PR branches."
 
       - name: Dispatch builds for each branch
         if: steps.discover.outputs.count != '0'

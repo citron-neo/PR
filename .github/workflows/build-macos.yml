@@ -160,7 +160,7 @@ jobs:
       - name: Patch AGL in Qt FindWrapOpenGL.cmake
         working-directory: ./citron
         run: |
-          QT_OPENGL_CMAKE="externals/qt/6.7.3/macos/lib/cmake/Qt6/FindWrapOpenGL.cmake"
+          QT_OPENGL_CMAKE="externals/qt/6.9.3/macos/lib/cmake/Qt6/FindWrapOpenGL.cmake"
           if [ -f "$QT_OPENGL_CMAKE" ]; then
             # Replace lines 40-46 with set(__opengl_agl_fw_path "")
             awk 'NR>=40 && NR<=46 {if(NR==40) print "          set(__opengl_agl_fw_path \"\")"; next}1' "$QT_OPENGL_CMAKE" > "$QT_OPENGL_CMAKE.tmp" && mv "$QT_OPENGL_CMAKE.tmp" "$QT_OPENGL_CMAKE"
@@ -223,8 +223,8 @@ jobs:
           fi
           echo "Found .app bundle at: $APP_BUNDLE_PATH"
 
-          MACDEPLOYQT_PATH="citron/build/externals/qt/6.7.3/macos/bin/macdeployqt"
-          QT_LIB_PATH="citron/build/externals/qt/6.7.3/macos/lib"
+          MACDEPLOYQT_PATH="citron/build/externals/qt/6.9.3/macos/bin/macdeployqt"
+          QT_LIB_PATH="citron/build/externals/qt/6.9.3/macos/lib"
 
           if [ ! -f "$MACDEPLOYQT_PATH" ]; then
             echo "::error::Could not find macdeployqt!"
