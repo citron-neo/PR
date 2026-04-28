@@ -82,7 +82,7 @@ jobs:
           COUNT=$(gh api "repos/${{ github.repository }}/actions/workflows/${WORKFLOW_FILE}/runs?status=success&per_page=100" --jq "[.workflow_runs[] | select(.head_sha == \"${HASH}\") | select(.id != ${{ github.run_id }})] | length")
           echo "already_built=$([ "$COUNT" -gt 0 ] && echo true || echo false)" >> $GITHUB_OUTPUT
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.EMULATOR_PR_TOKEN }}
 
       - name: Compare versions
         id: compare
@@ -182,7 +182,7 @@ jobs:
     steps:
       - name: Create Comment
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.EMULATOR_PR_TOKEN }}
           PR_NUMBER: ${{ needs.check-version.outputs.pr_number }}
           RUN_ID: ${{ github.run_id }}
         run: |
