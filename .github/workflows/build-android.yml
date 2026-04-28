@@ -1,22 +1,16 @@
-name: Build Citron (Android)
+﻿name: Build Citron (Android)
 
 concurrency:
   group: build-android-${{ inputs.target_branch || github.event.pull_request.head.ref || github.ref }}
   cancel-in-progress: true
 
 on:
-  push:
-    branches-ignore:
-      - main
-  pull_request:
-    branches-ignore:
-      - main
   schedule:
-    - cron: "0 12 * * *"
+    - cron: "0 * * * *"
   workflow_dispatch:
     inputs:
       target_branch:
-        description: "Upstream citron-neo/emulator branch to build"
+        description: "Upstream branch to build"
         required: false
         type: string
       pr_number:
@@ -27,6 +21,9 @@ on:
         description: "Head repo to clone from (e.g. user/emulator)"
         required: false
         type: string
+
+env:
+  UPSTREAM_REPO: "cheezwiz7899/emulator" # <--- Change this to switch forks
 
 jobs:
   check-version:
@@ -49,20 +46,14 @@ jobs:
           TARGET_BRANCH="${{ inputs.target_branch }}"
           HEAD_REPO="${{ inputs.head_repo }}"
 
-          if [ -z "$PR_NUMBER" ] && [ "${{ github.event_name }}" = "pull_request" ]; then
-            PR_NUMBER="${{ github.event.pull_request.number }}"
-            TARGET_BRANCH="${{ github.event.pull_request.head.ref }}"
-            HEAD_REPO="${{ github.event.pull_request.head.repo.full_name }}"
-          fi
-
-          if [ -z "$HEAD_REPO" ]; then HEAD_REPO="citron-neo/emulator"; fi
+          if [ -z "$HEAD_REPO" ]; then HEAD_REPO="${{ env.UPSTREAM_REPO }}"; fi
           if [ -z "$TARGET_BRANCH" ]; then TARGET_BRANCH="main"; fi
 
           REPO_URL="https://github.com/${HEAD_REPO}.git"
           FULL_HASH=$(git ls-remote "$REPO_URL" "refs/heads/$TARGET_BRANCH" | cut -f1 | head -n1)
           
           if [ -z "$FULL_HASH" ]; then
-            REPO_URL="https://github.com/citron-neo/emulator.git"
+            REPO_URL="https://github.com/${{ env.UPSTREAM_REPO }}.git"
             TARGET_BRANCH="main"
             FULL_HASH=$(git ls-remote "$REPO_URL" HEAD | cut -f1)
           fi
@@ -82,27 +73,104 @@ jobs:
           COUNT=$(gh api "repos/${{ github.repository }}/actions/workflows/${WORKFLOW_FILE}/runs?status=success&per_page=100" --jq "[.workflow_runs[] | select(.head_sha == \"${HASH}\") | select(.id != ${{ github.run_id }})] | length")
           echo "already_built=$([ "$COUNT" -gt 0 ] && echo true || echo false)" >> $GITHUB_OUTPUT
         env:
-          GH_TOKEN: ${{ secrets.EMULATOR_PR_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true
 
       - name: Compare versions
         id: compare
         run: |
-          if [ "${{ steps.built_check.outputs.already_built }}" = "true" ] && [ "${{ github.event_name }}" = "schedule" ]; then
+          if [ "${{ steps.built_check.outputs.already_built }}" = "true" ]; then
             echo "should_build=false" >> $GITHUB_OUTPUT
           else
             echo "should_build=true" >> $GITHUB_OUTPUT
           fi
 
+  comment-start:
+    name: Mark Progress
+    needs: [check-version]
+    if: needs.check-version.outputs.should_build == 'true' && needs.check-version.outputs.pr_number != ''
+    runs-on: ubuntu-latest
+    steps:
+      - name: Update Master Comment (In Progress)
+        env:
+          GH_TOKEN: ${{ secrets.EMULATOR_PR_TOKEN }}
+          PR_NUMBER: ${{ needs.check-version.outputs.pr_number }}
+          UPSTREAM: ${{ env.UPSTREAM_REPO }}
+          HASH_SHORT: ${{ needs.check-version.outputs.new_hash }}
+          HASH_FULL: ${{ needs.check-version.outputs.new_hash_full }}
+          HEAD_REPO: ${{ needs.check-version.outputs.head_repo }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then echo "EMULATOR_PR_TOKEN not set"; exit 0; fi
+          MARKER="<!-- citron-pr-builds:${PR_NUMBER} -->"
+          TITLE="**Build Artifacts for PR #${PR_NUMBER}**"
+          COMMENT_IDS=$(gh api "repos/${UPSTREAM}/issues/${PR_NUMBER}/comments?per_page=100" --jq ".[] | select(.body | contains(\"$MARKER\") or contains(\"Build Artifacts for PR #${PR_NUMBER}\")) | .id" 2>/dev/null || true)
+          COMMENT_ID=$(printf '%s\n' "$COMMENT_IDS" | sed '/^$/d' | tail -n 1)
+
+          if [ -z "$COMMENT_ID" ]; then
+            INITIAL_BODY="${MARKER}
+          ${TITLE}
+
+          | Platform | Commit | Artifacts (Direct Download) | Logs |
+          | :--- | :--- | :--- | :--- |
+          | **Windows** | | Pending | |
+          | **Linux** | | Pending | |
+          | **Android** | | Pending | |
+          | **macOS** | | Pending | |
+
+          *Note: Direct downloads powered by nightly.link*"
+            jq -n --arg body "$INITIAL_BODY" '{body: $body}' | gh api -X POST "repos/${UPSTREAM}/issues/${PR_NUMBER}/comments" --input - >/dev/null || echo "Failed creation"
+            sleep 2
+            COMMENT_IDS=$(gh api "repos/${UPSTREAM}/issues/${PR_NUMBER}/comments?per_page=100" --jq ".[] | select(.body | contains(\"$MARKER\") or contains(\"Build Artifacts for PR #${PR_NUMBER}\")) | .id" 2>/dev/null || true)
+            COMMENT_ID=$(printf '%s\n' "$COMMENT_IDS" | sed '/^$/d' | tail -n 1)
+          fi
+
+          for DUPLICATE_ID in $COMMENT_IDS; do
+            if [ -n "$COMMENT_ID" ] && [ "$DUPLICATE_ID" != "$COMMENT_ID" ]; then
+              gh api -X DELETE "repos/${UPSTREAM}/issues/comments/${DUPLICATE_ID}" >/dev/null 2>&1 || true
+            fi
+          done
+
+          if [ -n "$COMMENT_ID" ]; then
+            COMMIT_LINK="[\`${HASH_SHORT}\`](https://github.com/${HEAD_REPO}/commit/${HASH_FULL})"
+            export NEW_ROW="| **Android** | ${COMMIT_LINK} | Building... | |"
+            gh api "repos/${UPSTREAM}/issues/comments/${COMMENT_ID}" --jq ".body" > body.txt
+            grep -Fq "$MARKER" body.txt || { BODY=$(cat body.txt); printf '%s\n%s\n' "$MARKER" "$BODY" > body.txt; }
+            perl -pi -e 's|.*\*\*Android\*\*.*|$ENV{NEW_ROW}|' body.txt
+            jq -n --arg body "$(cat body.txt)" '{body: $body}' | gh api -X PATCH "repos/${UPSTREAM}/issues/comments/${COMMENT_ID}" --input - || echo "Failed update"
+          fi
+        continue-on-error: true
+
   build-android:
     name: Build Android APK
-    needs: [check-version]
-    if: needs.check-version.outputs.should_build == 'true'
+    needs: [check-version, comment-start]
+    if: always() && needs.check-version.outputs.should_build == 'true'
     runs-on: ubuntu-latest
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_COMPILERCHECK: content
+      CCACHE_SLOPPINESS: time_macros
     steps:
       - name: Clone Citron Source
         run: |
-          git clone --recursive -b "${{ needs.check-version.outputs.branch_name }}" "https://github.com/${{ needs.check-version.outputs.head_repo }}.git" citron_source
+          CLONE_REPO="${{ needs.check-version.outputs.head_repo }}"
+          if [[ "$CLONE_REPO" != *"/"* ]]; then CLONE_REPO="${{ env.UPSTREAM_REPO }}"; fi
+          git clone --recursive -b "${{ needs.check-version.outputs.branch_name }}" "https://github.com/${CLONE_REPO}.git" citron_source
       
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y ccache glslang-tools libvulkan-dev python3-requests patch
+
+      - name: Setup and Restore Cache
+        uses: actions/cache@v4
+        id: ccache-cache
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ runner.os }}-android-ccache-standard-${{ github.ref_name }}-${{ hashFiles('citron_source/**/CMakeLists.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-android-ccache-standard-${{ github.ref_name }}-
+            ${{ runner.os }}-android-ccache-standard-
+
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
@@ -132,24 +200,47 @@ jobs:
           export ANDROID_SDK_ROOT="$ANDROID_HOME"
           export ANDROID_NDK="$ANDROID_NDK_HOME"
           chmod +x gradlew
-          ./gradlew assembleMainlineRelease -Pcmake.args="-DENABLE_QT=OFF -DENABLE_SDL2=OFF -DENABLE_WEB_SERVICE=OFF -DENABLE_OPENSSL=OFF -DCITRON_USE_BUNDLED_VCPKG=ON -DCITRON_USE_BUNDLED_FFMPEG=ON -DCITRON_ENABLE_LTO=ON -DCITRON_BUILD_TYPE=Release"
+          ./gradlew assembleMainlineRelease -Pcmake.args="-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DENABLE_QT=OFF -DENABLE_SDL2=OFF -DENABLE_WEB_SERVICE=OFF -DENABLE_OPENSSL=OFF -DCITRON_USE_BUNDLED_VCPKG=ON -DCITRON_USE_BUNDLED_FFMPEG=ON -DCITRON_ENABLE_LTO=ON -DCITRON_BUILD_TYPE=Release"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: citron-android-pr-${{ needs.check-version.outputs.pr_number }}
+          name: citron-android-standard
           path: citron_source/src/android/app/build/outputs/apk/mainline/release/*.apk
 
   build-android-8elite:
     name: Build Android APK (Snapdragon 8 Elite)
-    needs: [check-version]
-    if: needs.check-version.outputs.should_build == 'true'
+    needs: [check-version, comment-start]
+    if: always() && needs.check-version.outputs.should_build == 'true'
     runs-on: ubuntu-latest
+    env:
+      TARGET: Lyb
+      MODEL: "8 Elite"
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_COMPILERCHECK: content
+      CCACHE_SLOPPINESS: time_macros
     steps:
       - name: Clone Citron Source
         run: |
-          git clone --recursive -b "${{ needs.check-version.outputs.branch_name }}" "https://github.com/${{ needs.check-version.outputs.head_repo }}.git" citron_source
+          CLONE_REPO="${{ needs.check-version.outputs.head_repo }}"
+          if [[ "$CLONE_REPO" != *"/"* ]]; then CLONE_REPO="${{ env.UPSTREAM_REPO }}"; fi
+          git clone --recursive -b "${{ needs.check-version.outputs.branch_name }}" "https://github.com/${CLONE_REPO}.git" citron_source
       
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y ccache glslang-tools libvulkan-dev python3-requests patch
+
+      - name: Setup and Restore Cache
+        uses: actions/cache@v4
+        id: ccache-cache-8elite
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ runner.os }}-android-ccache-${{ env.TARGET }}-${{ github.ref_name }}-${{ hashFiles('citron_source/**/CMakeLists.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-android-ccache-${{ env.TARGET }}-${{ github.ref_name }}-
+            ${{ runner.os }}-android-ccache-${{ env.TARGET }}-
+
       - name: Apply 8 Elite Patches
         working-directory: ./citron_source
         run: |
@@ -165,11 +256,6 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: '17'
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq wget unzip curl git cmake build-essential pkg-config zip glslang-tools nasm perl autoconf automake libtool yasm
 
       - name: Install Android SDK & NDK
         run: |
@@ -189,38 +275,61 @@ jobs:
           export ANDROID_SDK_ROOT="$ANDROID_HOME"
           export ANDROID_NDK="$ANDROID_NDK_HOME"
           chmod +x gradlew
-          ./gradlew assembleMainlineRelease -Pcmake.args="-DENABLE_QT=OFF -DENABLE_SDL2=OFF -DENABLE_WEB_SERVICE=OFF -DENABLE_OPENSSL=OFF -DCITRON_USE_BUNDLED_VCPKG=ON -DCITRON_USE_BUNDLED_FFMPEG=ON -DCITRON_ENABLE_LTO=ON -DCITRON_BUILD_TYPE=Release"
+          ./gradlew assembleMainlineRelease -Pcmake.args="-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DENABLE_QT=OFF -DENABLE_SDL2=OFF -DENABLE_WEB_SERVICE=OFF -DENABLE_OPENSSL=OFF -DCITRON_USE_BUNDLED_VCPKG=ON -DCITRON_USE_BUNDLED_FFMPEG=ON -DCITRON_ENABLE_LTO=ON -DCITRON_BUILD_TYPE=Release"
 
       - name: Upload APK (8 Elite)
         uses: actions/upload-artifact@v4
         with:
-          name: citron-android-8elite-pr-${{ needs.check-version.outputs.pr_number }}
+          name: citron-android-8elite
           path: citron_source/src/android/app/build/outputs/apk/mainline/release/*.apk
 
-  comment:
-    name: Comment on PR
+  comment-end:
+    name: Comment End
     needs: [check-version, build-android, build-android-8elite]
     if: always() && needs.check-version.outputs.pr_number != ''
     runs-on: ubuntu-latest
     steps:
-      - name: Create Comment
+      - name: Update Master Comment (Results)
         env:
           GH_TOKEN: ${{ secrets.EMULATOR_PR_TOKEN }}
           PR_NUMBER: ${{ needs.check-version.outputs.pr_number }}
           RUN_ID: ${{ github.run_id }}
+          REPO: ${{ github.repository }}
+          UPSTREAM: ${{ env.UPSTREAM_REPO }}
+          HASH_SHORT: ${{ needs.check-version.outputs.new_hash }}
+          HASH_FULL: ${{ needs.check-version.outputs.new_hash_full }}
+          HEAD_REPO: ${{ needs.check-version.outputs.head_repo }}
+          STD_STATUS: ${{ needs.build-android.result }}
+          ELITE_STATUS: ${{ needs.build-android-8elite.result }}
         run: |
-          BODY="🤖 **Android Builds for PR #${PR_NUMBER} are ready!**
+          if [ -z "$GH_TOKEN" ]; then echo "EMULATOR_PR_TOKEN not set"; exit 1; fi
+          MARKER="<!-- citron-pr-builds:${PR_NUMBER} -->"
+          COMMENT_IDS=$(gh api "repos/${UPSTREAM}/issues/${PR_NUMBER}/comments?per_page=100" --jq ".[] | select(.body | contains(\"$MARKER\") or contains(\"Build Artifacts for PR #${PR_NUMBER}\")) | .id" 2>/dev/null || true)
+          COMMENT_ID=$(printf '%s\n' "$COMMENT_IDS" | sed '/^$/d' | tail -n 1)
 
-          Includes Standard and Snapdragon 8 Elite (Qualcomm optimized) APKs.
+          for DUPLICATE_ID in $COMMENT_IDS; do
+            if [ -n "$COMMENT_ID" ] && [ "$DUPLICATE_ID" != "$COMMENT_ID" ]; then
+              gh api -X DELETE "repos/${UPSTREAM}/issues/comments/${DUPLICATE_ID}" >/dev/null 2>&1 || true
+            fi
+          done
           
-          [Download Artifacts](https://github.com/${{ github.repository }}/actions/runs/${RUN_ID})
+          if [ -n "$COMMENT_ID" ]; then
+            LOG_URL="https://github.com/${REPO}/actions/runs/${RUN_ID}"
+            COMMIT_LINK="[\`${HASH_SHORT}\`](https://github.com/${HEAD_REPO}/commit/${HASH_FULL})"
 
-          *Check the Actions run for APK files.*"
-          
-          EXISTING_COMMENT=$(gh pr view $PR_NUMBER -R citron-neo/emulator --json comments --jq ".comments[] | select(.body | contains(\"Android Builds for PR #${PR_NUMBER} are ready\")) | .id" | tail -n 1)
-          
-          if [ -n "$EXISTING_COMMENT" ]; then
-            gh api -X PATCH "repos/citron-neo/emulator/issues/comments/$EXISTING_COMMENT" -f body="$BODY"
+            if [ "$STD_STATUS" = "success" ] && [ "$ELITE_STATUS" = "success" ]; then
+              STD_URL="https://nightly.link/${REPO}/actions/runs/${RUN_ID}/citron-android-standard.zip"
+              ELITE_URL="https://nightly.link/${REPO}/actions/runs/${RUN_ID}/citron-android-8elite.zip"
+              ARTIFACTS="[Standard](${STD_URL}) [8 Elite](${ELITE_URL})"
+            else
+              ARTIFACTS="Failed"
+            fi
+
+            export NEW_ROW="| **Android** | ${COMMIT_LINK} | ${ARTIFACTS} | [Run](${LOG_URL}) |"
+            gh api "repos/${UPSTREAM}/issues/comments/${COMMENT_ID}" --jq ".body" > body.txt
+            grep -Fq "$MARKER" body.txt || { BODY=$(cat body.txt); printf '%s\n%s\n' "$MARKER" "$BODY" > body.txt; }
+            perl -pi -e 's|.*\*\*Android\*\*.*|$ENV{NEW_ROW}|' body.txt
+            jq -n --arg body "$(cat body.txt)" '{body: $body}' | gh api -X PATCH "repos/${UPSTREAM}/issues/comments/${COMMENT_ID}" --input - || echo "Failed update"
           else
-            gh pr comment $PR_NUMBER -R citron-neo/emulator --body "$BODY"
+            echo "Master comment not found, skipping final update."
           fi

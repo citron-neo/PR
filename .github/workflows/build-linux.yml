@@ -1,22 +1,14 @@
-name: Build Citron (Linux)
+﻿name: Build Citron (Linux)
 
 concurrency:
   group: build-linux-${{ inputs.target_branch || github.event.pull_request.head.ref || github.ref }}
   cancel-in-progress: true
 
 on:
-  push:
-    branches-ignore:
-      - main
-  pull_request:
-    branches-ignore:
-      - main
-  schedule:
-    - cron: "0 12 * * *"
   workflow_dispatch:
     inputs:
       target_branch:
-        description: "Upstream citron-neo/emulator branch to build"
+        description: "Upstream branch to build"
         required: false
         type: string
       pr_number:
@@ -27,6 +19,9 @@ on:
         description: "Head repo to clone from (e.g. user/emulator)"
         required: false
         type: string
+
+env:
+  UPSTREAM_REPO: "cheezwiz7899/emulator" # <--- Change this to switch forks
 
 jobs:
   check-version:
@@ -49,20 +44,14 @@ jobs:
           TARGET_BRANCH="${{ inputs.target_branch }}"
           HEAD_REPO="${{ inputs.head_repo }}"
 
-          if [ -z "$PR_NUMBER" ] && [ "${{ github.event_name }}" = "pull_request" ]; then
-            PR_NUMBER="${{ github.event.pull_request.number }}"
-            TARGET_BRANCH="${{ github.event.pull_request.head.ref }}"
-            HEAD_REPO="${{ github.event.pull_request.head.repo.full_name }}"
-          fi
-
-          if [ -z "$HEAD_REPO" ]; then HEAD_REPO="citron-neo/emulator"; fi
+          if [ -z "$HEAD_REPO" ]; then HEAD_REPO="${{ env.UPSTREAM_REPO }}"; fi
           if [ -z "$TARGET_BRANCH" ]; then TARGET_BRANCH="main"; fi
 
           REPO_URL="https://github.com/${HEAD_REPO}.git"
           FULL_HASH=$(git ls-remote "$REPO_URL" "refs/heads/$TARGET_BRANCH" | cut -f1 | head -n1)
           
           if [ -z "$FULL_HASH" ]; then
-            REPO_URL="https://github.com/citron-neo/emulator.git"
+            REPO_URL="https://github.com/${{ env.UPSTREAM_REPO }}.git"
             TARGET_BRANCH="main"
             FULL_HASH=$(git ls-remote "$REPO_URL" HEAD | cut -f1)
           fi
@@ -82,21 +71,77 @@ jobs:
           COUNT=$(gh api "repos/${{ github.repository }}/actions/workflows/${WORKFLOW_FILE}/runs?status=success&per_page=100" --jq "[.workflow_runs[] | select(.head_sha == \"${HASH}\") | select(.id != ${{ github.run_id }})] | length")
           echo "already_built=$([ "$COUNT" -gt 0 ] && echo true || echo false)" >> $GITHUB_OUTPUT
         env:
-          GH_TOKEN: ${{ secrets.EMULATOR_PR_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true
 
       - name: Compare versions
         id: compare
         run: |
-          if [ "${{ steps.built_check.outputs.already_built }}" = "true" ] && [ "${{ github.event_name }}" = "schedule" ]; then
+          if [ "${{ steps.built_check.outputs.already_built }}" = "true" ]; then
             echo "should_build=false" >> $GITHUB_OUTPUT
           else
             echo "should_build=true" >> $GITHUB_OUTPUT
           fi
 
+  comment-start:
+    name: Mark Progress
+    needs: [check-version]
+    if: needs.check-version.outputs.should_build == 'true' && needs.check-version.outputs.pr_number != ''
+    runs-on: ubuntu-latest
+    steps:
+      - name: Update Master Comment (In Progress)
+        env:
+          GH_TOKEN: ${{ secrets.EMULATOR_PR_TOKEN }}
+          PR_NUMBER: ${{ needs.check-version.outputs.pr_number }}
+          UPSTREAM: ${{ env.UPSTREAM_REPO }}
+          HASH_SHORT: ${{ needs.check-version.outputs.new_hash }}
+          HASH_FULL: ${{ needs.check-version.outputs.new_hash_full }}
+          HEAD_REPO: ${{ needs.check-version.outputs.head_repo }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then echo "EMULATOR_PR_TOKEN not set"; exit 0; fi
+          MARKER="<!-- citron-pr-builds:${PR_NUMBER} -->"
+          TITLE="**Build Artifacts for PR #${PR_NUMBER}**"
+          COMMENT_IDS=$(gh api "repos/${UPSTREAM}/issues/${PR_NUMBER}/comments?per_page=100" --jq ".[] | select(.body | contains(\"$MARKER\") or contains(\"Build Artifacts for PR #${PR_NUMBER}\")) | .id" 2>/dev/null || true)
+          COMMENT_ID=$(printf '%s\n' "$COMMENT_IDS" | sed '/^$/d' | tail -n 1)
+
+          if [ -z "$COMMENT_ID" ]; then
+            INITIAL_BODY="${MARKER}
+          ${TITLE}
+
+          | Platform | Commit | Artifacts (Direct Download) | Logs |
+          | :--- | :--- | :--- | :--- |
+          | **Windows** | | Pending | |
+          | **Linux** | | Pending | |
+          | **Android** | | Pending | |
+          | **macOS** | | Pending | |
+
+          *Note: Direct downloads powered by nightly.link*"
+            jq -n --arg body "$INITIAL_BODY" '{body: $body}' | gh api -X POST "repos/${UPSTREAM}/issues/${PR_NUMBER}/comments" --input - >/dev/null || echo "Failed creation"
+            sleep 2
+            COMMENT_IDS=$(gh api "repos/${UPSTREAM}/issues/${PR_NUMBER}/comments?per_page=100" --jq ".[] | select(.body | contains(\"$MARKER\") or contains(\"Build Artifacts for PR #${PR_NUMBER}\")) | .id" 2>/dev/null || true)
+            COMMENT_ID=$(printf '%s\n' "$COMMENT_IDS" | sed '/^$/d' | tail -n 1)
+          fi
+
+          for DUPLICATE_ID in $COMMENT_IDS; do
+            if [ -n "$COMMENT_ID" ] && [ "$DUPLICATE_ID" != "$COMMENT_ID" ]; then
+              gh api -X DELETE "repos/${UPSTREAM}/issues/comments/${DUPLICATE_ID}" >/dev/null 2>&1 || true
+            fi
+          done
+
+          if [ -n "$COMMENT_ID" ]; then
+            COMMIT_LINK="[\`${HASH_SHORT}\`](https://github.com/${HEAD_REPO}/commit/${HASH_FULL})"
+            export NEW_ROW="| **Linux** | ${COMMIT_LINK} | Building... | |"
+            gh api "repos/${UPSTREAM}/issues/comments/${COMMENT_ID}" --jq ".body" > body.txt
+            grep -Fq "$MARKER" body.txt || { BODY=$(cat body.txt); printf '%s\n%s\n' "$MARKER" "$BODY" > body.txt; }
+            perl -pi -e 's|.*\*\*Linux\*\*.*|$ENV{NEW_ROW}|' body.txt
+            jq -n --arg body "$(cat body.txt)" '{body: $body}' | gh api -X PATCH "repos/${UPSTREAM}/issues/comments/${COMMENT_ID}" --input - || echo "Failed update"
+          fi
+        continue-on-error: true
+
   build:
     name: "${{ matrix.name }}"
-    needs: [check-version]
-    if: needs.check-version.outputs.should_build == 'true'
+    needs: [check-version, comment-start]
+    if: always() && needs.check-version.outputs.should_build == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     strategy:
@@ -105,17 +150,17 @@ jobs:
         include:
           - name: "Citron Build (Normal x86_64)"
             os: ubuntu-latest
-            artifact_suffix: "_x86_64"
+            artifact_name: "Artifacts_x86_64"
             script_suffix: ""
             build_arg: ""
           - name: "Citron Build (Optimized x86_64)"
             os: ubuntu-latest
-            artifact_suffix: "_v3"
+            artifact_name: "Artifacts_v3"
             script_suffix: "_v3"
             build_arg: "v3"
           - name: "Citron Build (aarch64)"
             os: ubuntu-24.04-arm
-            artifact_suffix: "_aarch64"
+            artifact_name: "Artifacts_aarch64"
             script_suffix: ""
             build_arg: ""
 
@@ -131,9 +176,9 @@ jobs:
       - name: Clone Citron Source Code
         shell: bash
         run: |
-          REPO_URL="https://github.com/${{ needs.check-version.outputs.head_repo }}.git"
-          TARGET_BRANCH="${{ needs.check-version.outputs.branch_name }}"
-          git clone --recurse-submodules --shallow-submodules --depth 1 -b "$TARGET_BRANCH" "$REPO_URL" emulator
+          CLONE_REPO="${{ needs.check-version.outputs.head_repo }}"
+          if [[ "$CLONE_REPO" != *"/"* ]]; then CLONE_REPO="${{ env.UPSTREAM_REPO }}"; fi
+          git clone --recurse-submodules --shallow-submodules --depth 1 -b "${{ needs.check-version.outputs.branch_name }}" "https://github.com/${CLONE_REPO}.git" emulator
 
       - name: Prepare Build Environment
         run: |
@@ -171,33 +216,56 @@ jobs:
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: Artifacts${{ matrix.artifact_suffix }}
+          name: ${{ matrix.artifact_name }}
           path: emulator/dist/
 
-  comment:
-    name: Comment on PR
+  comment-end:
+    name: Comment End
     needs: [check-version, build]
     if: always() && needs.check-version.outputs.pr_number != ''
     runs-on: ubuntu-latest
     steps:
-      - name: Create Comment
+      - name: Update Master Comment (Results)
         env:
           GH_TOKEN: ${{ secrets.EMULATOR_PR_TOKEN }}
           PR_NUMBER: ${{ needs.check-version.outputs.pr_number }}
           RUN_ID: ${{ github.run_id }}
+          REPO: ${{ github.repository }}
+          UPSTREAM: ${{ env.UPSTREAM_REPO }}
+          HASH_SHORT: ${{ needs.check-version.outputs.new_hash }}
+          HASH_FULL: ${{ needs.check-version.outputs.new_hash_full }}
+          HEAD_REPO: ${{ needs.check-version.outputs.head_repo }}
+          BUILD_STATUS: ${{ needs.build.result }}
         run: |
-          BODY="🐧 **Linux Builds for PR #${PR_NUMBER} are ready!**
+          if [ -z "$GH_TOKEN" ]; then echo "EMULATOR_PR_TOKEN not set"; exit 1; fi
+          MARKER="<!-- citron-pr-builds:${PR_NUMBER} -->"
+          COMMENT_IDS=$(gh api "repos/${UPSTREAM}/issues/${PR_NUMBER}/comments?per_page=100" --jq ".[] | select(.body | contains(\"$MARKER\") or contains(\"Build Artifacts for PR #${PR_NUMBER}\")) | .id" 2>/dev/null || true)
+          COMMENT_ID=$(printf '%s\n' "$COMMENT_IDS" | sed '/^$/d' | tail -n 1)
 
-          Includes: x86_64, x86_64_v3, and aarch64 builds.
+          for DUPLICATE_ID in $COMMENT_IDS; do
+            if [ -n "$COMMENT_ID" ] && [ "$DUPLICATE_ID" != "$COMMENT_ID" ]; then
+              gh api -X DELETE "repos/${UPSTREAM}/issues/comments/${DUPLICATE_ID}" >/dev/null 2>&1 || true
+            fi
+          done
           
-          [Download Artifacts](https://github.com/${{ github.repository }}/actions/runs/${RUN_ID})
+          if [ -n "$COMMENT_ID" ]; then
+            LOG_URL="https://github.com/${REPO}/actions/runs/${RUN_ID}"
+            COMMIT_LINK="[\`${HASH_SHORT}\`](https://github.com/${HEAD_REPO}/commit/${HASH_FULL})"
 
-          *Check the Actions run for AppImage and tar.zst files.*"
-          
-          EXISTING_COMMENT=$(gh pr view $PR_NUMBER -R citron-neo/emulator --json comments --jq ".comments[] | select(.body | contains(\"Linux Builds for PR #${PR_NUMBER} are ready\")) | .id" | tail -n 1)
-          
-          if [ -n "$EXISTING_COMMENT" ]; then
-            gh api -X PATCH "repos/citron-neo/emulator/issues/comments/$EXISTING_COMMENT" -f body="$BODY"
+            if [ "$BUILD_STATUS" = "success" ]; then
+              X86_URL="https://nightly.link/${REPO}/actions/runs/${RUN_ID}/Artifacts_x86_64.zip"
+              V3_URL="https://nightly.link/${REPO}/actions/runs/${RUN_ID}/Artifacts_v3.zip"
+              ARM_URL="https://nightly.link/${REPO}/actions/runs/${RUN_ID}/Artifacts_aarch64.zip"
+              ARTIFACTS="[x86_64](${X86_URL}) [v3](${V3_URL}) [ARM](${ARM_URL})"
+            else
+              ARTIFACTS="Failed"
+            fi
+
+            export NEW_ROW="| **Linux** | ${COMMIT_LINK} | ${ARTIFACTS} | [Run](${LOG_URL}) |"
+            gh api "repos/${UPSTREAM}/issues/comments/${COMMENT_ID}" --jq ".body" > body.txt
+            grep -Fq "$MARKER" body.txt || { BODY=$(cat body.txt); printf '%s\n%s\n' "$MARKER" "$BODY" > body.txt; }
+            perl -pi -e 's|.*\*\*Linux\*\*.*|$ENV{NEW_ROW}|' body.txt
+            jq -n --arg body "$(cat body.txt)" '{body: $body}' | gh api -X PATCH "repos/${UPSTREAM}/issues/comments/${COMMENT_ID}" --input - || echo "Failed update"
           else
-            gh pr comment $PR_NUMBER -R citron-neo/emulator --body "$BODY"
+            echo "Master comment not found, skipping final update."
           fi

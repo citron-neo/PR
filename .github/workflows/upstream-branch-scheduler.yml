@@ -2,12 +2,15 @@ name: Schedule Upstream Open PR Builds
 
 on:
   schedule:
-    - cron: "30 12 * * *"
+    - cron: "0 */2 * * *"
   workflow_dispatch: {}
 
 permissions:
   actions: write
   contents: read
+
+env:
+  UPSTREAM_REPO: "cheezwiz7899/emulator" # <--- Change this to switch forks
 
 jobs:
   dispatch-branch-builds:
@@ -17,32 +20,69 @@ jobs:
         id: discover
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.EMULATOR_PR_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
-          # Fetch open PRs, including those from forks. 
-          # We store: pr_number, head_ref (branch), head_repo_full_name
-          gh api "repos/citron-neo/emulator/pulls?state=open&per_page=100" \
+          # Fetch open PRs from the targeted upstream repo
+          gh api "repos/${{ env.UPSTREAM_REPO }}/pulls?state=open&per_page=100" \
             --jq '.[] | [.number, .head.ref, .head.repo.full_name] | @tsv' \
             > prs.tsv
 
           COUNT=$(wc -l < prs.tsv | tr -d ' ')
           echo "count=$COUNT" >> $GITHUB_OUTPUT
-          echo "Discovered $COUNT open PRs."
+          echo "Discovered $COUNT open PRs on ${{ env.UPSTREAM_REPO }}."
 
       - name: Dispatch builds for each PR
         if: steps.discover.outputs.count != '0'
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTIONS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMMENT_TOKEN: ${{ secrets.EMULATOR_PR_TOKEN || secrets.GITHUB_TOKEN }}
+          UPSTREAM: ${{ env.UPSTREAM_REPO }}
         run: |
           REPO="${{ github.repository }}"
           while IFS=$'\t' read -r PR_NUMBER BRANCH HEAD_REPO; do
             [ -z "$PR_NUMBER" ] && continue
             echo "Dispatching builds for PR #$PR_NUMBER (Branch: $BRANCH from $HEAD_REPO)"
+
+            MARKER="<!-- citron-pr-builds:${PR_NUMBER} -->"
+            TITLE="**Build Artifacts for PR #${PR_NUMBER}**"
+            COMMENT_IDS=$(GH_TOKEN="$COMMENT_TOKEN" gh api "repos/${UPSTREAM}/issues/${PR_NUMBER}/comments?per_page=100" --jq ".[] | select(.body | contains(\"$MARKER\") or contains(\"Build Artifacts for PR #${PR_NUMBER}\")) | .id" 2>/dev/null || true)
+            COMMENT_ID=$(printf '%s\n' "$COMMENT_IDS" | sed '/^$/d' | tail -n 1)
+
+            if [ -z "$COMMENT_ID" ]; then
+              INITIAL_BODY="${MARKER}
+              ${TITLE}
+
+              | Platform | Commit | Artifacts (Direct Download) | Logs |
+              | :--- | :--- | :--- | :--- |
+              | **Windows** | | Pending | |
+              | **Linux** | | Pending | |
+              | **Android** | | Pending | |
+              | **macOS** | | Pending | |
+
+              *Note: Direct downloads powered by nightly.link*"
+              jq -n --arg body "$INITIAL_BODY" '{body: $body}' | GH_TOKEN="$COMMENT_TOKEN" gh api -X POST "repos/${UPSTREAM}/issues/${PR_NUMBER}/comments" --input - >/dev/null || echo "Failed to create master comment for PR #$PR_NUMBER"
+              COMMENT_IDS=$(GH_TOKEN="$COMMENT_TOKEN" gh api "repos/${UPSTREAM}/issues/${PR_NUMBER}/comments?per_page=100" --jq ".[] | select(.body | contains(\"$MARKER\") or contains(\"Build Artifacts for PR #${PR_NUMBER}\")) | .id" 2>/dev/null || true)
+              COMMENT_ID=$(printf '%s\n' "$COMMENT_IDS" | sed '/^$/d' | tail -n 1)
+            fi
+
+            for DUPLICATE_ID in $COMMENT_IDS; do
+              if [ -n "$COMMENT_ID" ] && [ "$DUPLICATE_ID" != "$COMMENT_ID" ]; then
+                GH_TOKEN="$COMMENT_TOKEN" gh api -X DELETE "repos/${UPSTREAM}/issues/comments/${DUPLICATE_ID}" >/dev/null 2>&1 || true
+              fi
+            done
+
+            if [ -n "$COMMENT_ID" ]; then
+              GH_TOKEN="$COMMENT_TOKEN" gh api "repos/${UPSTREAM}/issues/comments/${COMMENT_ID}" --jq ".body" > body.txt
+              if ! grep -Fq "$MARKER" body.txt; then
+                BODY=$(cat body.txt)
+                printf '%s\n%s\n' "$MARKER" "$BODY" > body.txt
+                jq -n --arg body "$(cat body.txt)" '{body: $body}' | GH_TOKEN="$COMMENT_TOKEN" gh api -X PATCH "repos/${UPSTREAM}/issues/comments/${COMMENT_ID}" --input - >/dev/null || true
+              fi
+            fi
             
-            # We pass the PR number and the head repo so the build workflow knows where to clone from and where to comment.
-            gh workflow run build-windows.yml -R "$REPO" --ref main -f target_branch="$BRANCH" -f pr_number="$PR_NUMBER" -f head_repo="$HEAD_REPO"
-            gh workflow run build-linux.yml -R "$REPO" --ref main -f target_branch="$BRANCH" -f pr_number="$PR_NUMBER" -f head_repo="$HEAD_REPO"
-            gh workflow run build-android.yml -R "$REPO" --ref main -f target_branch="$BRANCH" -f pr_number="$PR_NUMBER" -f head_repo="$HEAD_REPO"
-            gh workflow run build-macos.yml -R "$REPO" --ref main -f target_branch="$BRANCH" -f pr_number="$PR_NUMBER" -f head_repo="$HEAD_REPO"
+            GH_TOKEN="$ACTIONS_TOKEN" gh workflow run build-windows.yml -R "$REPO" --ref main -f target_branch="$BRANCH" -f pr_number="$PR_NUMBER" -f head_repo="$HEAD_REPO"
+            GH_TOKEN="$ACTIONS_TOKEN" gh workflow run build-linux.yml -R "$REPO" --ref main -f target_branch="$BRANCH" -f pr_number="$PR_NUMBER" -f head_repo="$HEAD_REPO"
+            GH_TOKEN="$ACTIONS_TOKEN" gh workflow run build-android.yml -R "$REPO" --ref main -f target_branch="$BRANCH" -f pr_number="$PR_NUMBER" -f head_repo="$HEAD_REPO"
+            GH_TOKEN="$ACTIONS_TOKEN" gh workflow run build-macos.yml -R "$REPO" --ref main -f target_branch="$BRANCH" -f pr_number="$PR_NUMBER" -f head_repo="$HEAD_REPO"
           done < prs.tsv
