@@ -1,5 +1,9 @@
 name: Build Citron (Android)
 
+concurrency:
+  group: build-android-${{ inputs.target_branch || github.event.pull_request.head.ref || github.ref }}
+  cancel-in-progress: true
+
 on:
   push:
     branches-ignore:
@@ -7,123 +11,86 @@ on:
   pull_request:
     branches-ignore:
       - main
+  schedule:
+    - cron: "0 12 * * *"
   workflow_dispatch:
     inputs:
       target_branch:
         description: "Upstream citron-neo/emulator branch to build"
         required: false
         type: string
-  schedule:
-    - cron: "0 12 * * *"
+      pr_number:
+        description: "PR number to comment on"
+        required: false
+        type: string
+      head_repo:
+        description: "Head repo to clone from (e.g. user/emulator)"
+        required: false
+        type: string
 
 jobs:
   check-version:
-    name: Check if new version available
+    name: Check if build needed
     runs-on: ubuntu-latest
     outputs:
       should_build: ${{ steps.compare.outputs.should_build }}
       new_hash: ${{ steps.upstream.outputs.hash_short }}
       new_hash_full: ${{ steps.upstream.outputs.hash_full }}
-      branch_name: ${{ steps.branch_check.outputs.branch_name }}
-
+      branch_name: ${{ steps.upstream.outputs.branch_name }}
+      head_repo: ${{ steps.upstream.outputs.head_repo }}
+      pr_number: ${{ steps.upstream.outputs.pr_number }}
     steps:
       - name: Checkout this repo
         uses: actions/checkout@v4
-
-      - name: Check if feature branch exists and get commit hash
-        id: branch_check
-        run: |
-          REPO_URL="https://github.com/citron-neo/emulator.git"
-          if [ -n "${{ inputs.target_branch }}" ]; then
-            CANDIDATE_BRANCH="${{ inputs.target_branch }}"
-          elif [ "${{ github.event_name }}" = "pull_request" ]; then
-            CANDIDATE_BRANCH="${{ github.event.pull_request.head.ref }}"
-          elif [ "${{ github.event_name }}" = "push" ]; then
-            CANDIDATE_BRANCH="${{ github.ref_name }}"
-          else
-            CANDIDATE_BRANCH="main"
-          fi
-
-          if [ -n "$CANDIDATE_BRANCH" ] && git ls-remote --heads "$REPO_URL" "$CANDIDATE_BRANCH" | grep -q "$CANDIDATE_BRANCH"; then
-            BRANCH_NAME="$CANDIDATE_BRANCH"
-            FULL_HASH=$(git ls-remote "$REPO_URL" "refs/heads/$BRANCH_NAME" | cut -f1 | head -n1)
-            echo "✅ Using upstream branch: $BRANCH_NAME"
-          else
-            BRANCH_NAME="main"
-            FULL_HASH=$(git ls-remote "$REPO_URL" HEAD | cut -f1)
-            echo "⚠️ Upstream branch '$CANDIDATE_BRANCH' not found, falling back to: $BRANCH_NAME"
-          fi
-
-          SHORT_HASH=$(echo "$FULL_HASH" | cut -c1-7)
-          echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
-          echo "hash_short=$SHORT_HASH" >> $GITHUB_OUTPUT
-          echo "hash_full=$FULL_HASH" >> $GITHUB_OUTPUT
-          echo "hash(short): $SHORT_HASH"
-          echo "hash(full):   $FULL_HASH"
-
-      - name: Check if branch commit already built
-        id: built_check
-        run: |
-          BRANCH="${{ steps.branch_check.outputs.branch_name }}"
-          HASH="${{ steps.branch_check.outputs.hash_full }}"
-          WORKFLOW_FILE="build-android.yml"
-
-          COUNT=$(gh api "repos/${{ github.repository }}/actions/workflows/${WORKFLOW_FILE}/runs?branch=${BRANCH}&status=success&per_page=100" --jq "[.workflow_runs[] | select(.head_sha == \"${HASH}\") | select(.id != ${{ github.run_id }})] | length")
-
-          if [ "$COUNT" -gt 0 ]; then
-            echo "already_built=true" >> $GITHUB_OUTPUT
-          else
-            echo "already_built=false" >> $GITHUB_OUTPUT
-          fi
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Get upstream commit hash
         id: upstream
         run: |
-          echo "hash_short=${{ steps.branch_check.outputs.hash_short }}" >> $GITHUB_OUTPUT
-          echo "hash_full=${{ steps.branch_check.outputs.hash_full }}" >> $GITHUB_OUTPUT
-          echo "Upstream short: ${{ steps.branch_check.outputs.hash_short }}"
+          PR_NUMBER="${{ inputs.pr_number }}"
+          TARGET_BRANCH="${{ inputs.target_branch }}"
+          HEAD_REPO="${{ inputs.head_repo }}"
 
-      - name: Get last built version
-        id: last_built
-        run: |
-          LAST_HASH=$(cat LATEST_VERSION 2>/dev/null | tr -d '\n' || echo "none")
-          echo "last_hash=$LAST_HASH" >> $GITHUB_OUTPUT
-          echo "Last built hash: $LAST_HASH"
-
-      - name: Check if release exists
-        id: release_check
-        run: |
-          if gh release view nightly-android --repo "${{ github.repository }}" > /dev/null 2>&1; then
-            echo "exists=true" >> $GITHUB_OUTPUT
-            echo "Release exists"
-          else
-            echo "exists=false" >> $GITHUB_OUTPUT
-            echo "Release does not exist"
+          if [ -z "$PR_NUMBER" ] && [ "${{ github.event_name }}" = "pull_request" ]; then
+            PR_NUMBER="${{ github.event.pull_request.number }}"
+            TARGET_BRANCH="${{ github.event.pull_request.head.ref }}"
+            HEAD_REPO="${{ github.event.pull_request.head.repo.full_name }}"
           fi
+
+          if [ -z "$HEAD_REPO" ]; then HEAD_REPO="citron-neo/emulator"; fi
+          if [ -z "$TARGET_BRANCH" ]; then TARGET_BRANCH="main"; fi
+
+          REPO_URL="https://github.com/${HEAD_REPO}.git"
+          FULL_HASH=$(git ls-remote "$REPO_URL" "refs/heads/$TARGET_BRANCH" | cut -f1 | head -n1)
+          
+          if [ -z "$FULL_HASH" ]; then
+            REPO_URL="https://github.com/citron-neo/emulator.git"
+            TARGET_BRANCH="main"
+            FULL_HASH=$(git ls-remote "$REPO_URL" HEAD | cut -f1)
+          fi
+
+          SHORT_HASH=$(echo "$FULL_HASH" | cut -c1-7)
+          echo "branch_name=$TARGET_BRANCH" >> $GITHUB_OUTPUT
+          echo "hash_short=$SHORT_HASH" >> $GITHUB_OUTPUT
+          echo "hash_full=$FULL_HASH" >> $GITHUB_OUTPUT
+          echo "head_repo=$HEAD_REPO" >> $GITHUB_OUTPUT
+          echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
+
+      - name: Check if already built
+        id: built_check
+        run: |
+          HASH="${{ steps.upstream.outputs.hash_full }}"
+          WORKFLOW_FILE="build-android.yml"
+          COUNT=$(gh api "repos/${{ github.repository }}/actions/workflows/${WORKFLOW_FILE}/runs?status=success&per_page=100" --jq "[.workflow_runs[] | select(.head_sha == \"${HASH}\") | select(.id != ${{ github.run_id }})] | length")
+          echo "already_built=$([ "$COUNT" -gt 0 ] && echo true || echo false)" >> $GITHUB_OUTPUT
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        continue-on-error: true
 
       - name: Compare versions
         id: compare
         run: |
-          if [ "${{ steps.built_check.outputs.already_built }}" = "true" ]; then
+          if [ "${{ steps.built_check.outputs.already_built }}" = "true" ] && [ "${{ github.event_name }}" = "schedule" ]; then
             echo "should_build=false" >> $GITHUB_OUTPUT
-            echo "⏭️ Branch commit already built - skipping"
-          elif [ "${{ github.event_name }}" = "push" ] || [ "${{ github.event_name }}" = "pull_request" ] || [ -n "${{ inputs.target_branch }}" ]; then
-            echo "should_build=true" >> $GITHUB_OUTPUT
-            echo "✅ Push/PR event detected - will build"
-          elif [ "${{ steps.upstream.outputs.hash_short }}" != "${{ steps.last_built.outputs.last_hash }}" ]; then
-            echo "should_build=true" >> $GITHUB_OUTPUT
-            echo "✅ New version detected - will build"
-          elif [ "${{ steps.release_check.outputs.exists }}" != "true" ]; then
-            echo "should_build=true" >> $GITHUB_OUTPUT
-            echo "✅ No release exists - will build"
           else
-            echo "should_build=false" >> $GITHUB_OUTPUT
-            echo "⏭️ No changes - skipping build"
+            echo "should_build=true" >> $GITHUB_OUTPUT
           fi
 
   build-android:
@@ -131,58 +98,11 @@ jobs:
     needs: [check-version]
     if: needs.check-version.outputs.should_build == 'true'
     runs-on: ubuntu-latest
-    outputs:
-      git_hash: ${{ steps.get_hash.outputs.git_hash }}
-      branch_name: ${{ needs.check-version.outputs.branch_name }}
-
     steps:
-      - name: Clone Citron Source Code
-        shell: bash
+      - name: Clone Citron Source
         run: |
-          REPO_URL="https://github.com/citron-neo/emulator.git"
-          TARGET_BRANCH="${{ needs.check-version.outputs.branch_name }}"
-          
-          ATTEMPT=0
-          MAX_ATTEMPTS=999
-
-          while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
-            ATTEMPT=$((ATTEMPT + 1))
-            echo "Attempt $ATTEMPT of $MAX_ATTEMPTS: Cloning repository..."
-
-            # 1. CRITICAL: Wipe the directory before every attempt
-            rm -rf citron_source
-
-            echo "🌿 Cloning branch: $TARGET_BRANCH"
-            if git clone --recurse-submodules --shallow-submodules --depth 1 -b "$TARGET_BRANCH" "$REPO_URL" citron_source; then
-              echo "✅ Clone successful."
-              exit 0
-            fi
-
-            echo "⚠️ Clone failed. Retrying in 15 seconds..."
-            sleep 15
-          done
-
-          echo "❌ Failed to clone after $MAX_ATTEMPTS attempts."
-          exit 1
-
-      - name: Force Update Submodules
-        working-directory: ./citron_source
-        run: |
-          git submodule sync --recursive
-          git submodule update --init --recursive --depth 1 --force
-
-      - name: Ensure vcpkg has full history
-        working-directory: ./citron_source
-        run: |
-          if [ "$(git -C externals/vcpkg rev-parse --is-shallow-repository 2>/dev/null)" = "true" ]; then
-            git -C externals/vcpkg fetch --unshallow --tags
-          fi
-
-      - name: Get Citron Commit Hash
-        id: get_hash
-        working-directory: ./citron_source
-        run: echo "git_hash=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
-
+          git clone --recursive -b "${{ needs.check-version.outputs.branch_name }}" "https://github.com/${{ needs.check-version.outputs.head_repo }}.git" citron_source
+      
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
@@ -192,42 +112,30 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq \
-            wget unzip curl git cmake build-essential \
-            pkg-config zip glslang-tools nasm perl \
-            autoconf automake libtool yasm
+          sudo apt-get install -y -qq wget unzip curl git cmake build-essential pkg-config zip glslang-tools nasm perl autoconf automake libtool yasm
 
-      - name: Install Android SDK Command-line Tools
+      - name: Install Android SDK & NDK
         run: |
           wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
           unzip -q commandlinetools-linux-11076708_latest.zip
-          mkdir -p android-sdk/cmdline-tools
-          mv cmdline-tools android-sdk/cmdline-tools/latest
-
-      - name: Set up Android Environment Variables
-        run: |
-          echo "ANDROID_HOME=$PWD/android-sdk" >> $GITHUB_ENV
-          echo "$PWD/android-sdk/cmdline-tools/latest/bin" >> $GITHUB_PATH
-
-      - name: Accept Android SDK licenses and install NDK
-        run: |
+          mkdir -p android-sdk/cmdline-tools; mv cmdline-tools android-sdk/cmdline-tools/latest
+          export ANDROID_HOME=$PWD/android-sdk
+          export PATH=$PATH:$ANDROID_HOME/cmdline-tools/latest/bin
           yes | sdkmanager --licenses > /dev/null || true
           sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0" "ndk;26.1.10909125"
+          echo "ANDROID_HOME=$ANDROID_HOME" >> $GITHUB_ENV
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/26.1.10909125" >> $GITHUB_ENV
 
-      - name: Build APK with Gradle
+      - name: Build APK
         working-directory: ./citron_source/src/android
         run: |
-          export ANDROID_SDK_ROOT="$ANDROID_HOME"
-          export ANDROID_NDK="$ANDROID_NDK_HOME"
           chmod +x gradlew
-          ./gradlew assembleMainlineRelease \
-            -Pcmake.args="-DENABLE_QT=OFF -DENABLE_SDL2=OFF -DENABLE_WEB_SERVICE=OFF -DENABLE_OPENSSL=OFF -DCITRON_USE_BUNDLED_VCPKG=ON -DCITRON_USE_BUNDLED_FFMPEG=ON -DCITRON_ENABLE_LTO=ON -DCITRON_BUILD_TYPE=Release"
+          ./gradlew assembleMainlineRelease -Pcmake.args="-DENABLE_QT=OFF -DENABLE_SDL2=OFF -DENABLE_WEB_SERVICE=OFF -DENABLE_OPENSSL=OFF -DCITRON_USE_BUNDLED_VCPKG=ON -DCITRON_USE_BUNDLED_FFMPEG=ON -DCITRON_ENABLE_LTO=ON -DCITRON_BUILD_TYPE=Release"
 
-      - name: Upload APK artifact
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: citron-android-nightly
+          name: citron-android-pr-${{ needs.check-version.outputs.pr_number }}
           path: citron_source/src/android/app/build/outputs/apk/mainline/release/*.apk
 
   build-android-8elite:
@@ -235,107 +143,20 @@ jobs:
     needs: [check-version]
     if: needs.check-version.outputs.should_build == 'true'
     runs-on: ubuntu-latest
-    outputs:
-      git_hash: ${{ steps.get_hash.outputs.git_hash }}
-      branch_name: ${{ needs.check-version.outputs.branch_name }}
-
-    env:
-      TARGET: Lyb
-      MODEL: "8 Elite"
-      CCACHE_DIR: ${{ github.workspace }}/.ccache
-      CCACHE_COMPILERCHECK: content
-      CCACHE_SLOPPINESS: time_macros
-
     steps:
-      - name: Checkout this repo
-        uses: actions/checkout@v4
-
-      - name: Install Build Dependencies
+      - name: Clone Citron Source
         run: |
-          sudo apt-get update -y
-          sudo apt-get install -y ccache glslang-tools libvulkan-dev python3-requests patch
-
-      - name: Clone Citron Source Code
-        shell: bash
-        run: |
-          REPO_URL="https://github.com/citron-neo/emulator.git"
-          TARGET_BRANCH="${{ needs.check-version.outputs.branch_name }}"
-          
-          ATTEMPT=0
-          MAX_ATTEMPTS=999
-
-          while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
-            ATTEMPT=$((ATTEMPT + 1))
-            echo "Attempt $ATTEMPT of $MAX_ATTEMPTS: Cloning repository..."
-
-            # 1. CRITICAL: Wipe the directory before every attempt
-            rm -rf citron_source
-
-            echo "🌿 Cloning branch: $TARGET_BRANCH"
-            if git clone --recurse-submodules --shallow-submodules --depth 1 -b "$TARGET_BRANCH" "$REPO_URL" citron_source; then
-              echo "✅ Clone successful."
-              exit 0
-            fi
-
-            echo "⚠️ Clone failed. Retrying in 15 seconds..."
-            sleep 15
-          done
-
-          echo "❌ Failed to clone after $MAX_ATTEMPTS attempts."
-          exit 1
-
-      - name: Force Update Submodules
+          git clone --recursive -b "${{ needs.check-version.outputs.branch_name }}" "https://github.com/${{ needs.check-version.outputs.head_repo }}.git" citron_source
+      
+      - name: Apply 8 Elite Patches
         working-directory: ./citron_source
         run: |
-          git submodule sync --recursive
-          git submodule update --init --recursive --depth 1 --force
-
-      - name: Ensure vcpkg has full history
-        working-directory: ./citron_source
-        run: |
-          if [ "$(git -C externals/vcpkg rev-parse --is-shallow-repository 2>/dev/null)" = "true" ]; then
-            git -C externals/vcpkg fetch --unshallow --tags
-          fi
-
-      - name: Get Citron Commit Hash
-        id: get_hash
-        working-directory: ./citron_source
-        run: echo "git_hash=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
-
-      - name: Apply All Patches (Snapdragon 8 Elite)
-        working-directory: ./citron_source
-        run: |
-          echo "Applying Snapdragon 8 Elite patches..."
-
-          # --- Patch 1: Force System Driver Load (native.cpp) ---
           sed -i '/if (!handle) {/,/}/c\    if (!handle) {\n        handle = dlopen("libvulkan.so", RTLD_NOW);\n    }' src/android/app/src/main/jni/native.cpp
-
-          # --- Patch 2: 8 Elite Fixes for Qualcomm (vulkan_device.h) ---
           sed -i '/bool IsShaderInt64Supported() const {/a \        const auto driver = GetDriverID();\n        if (driver == VK_DRIVER_ID_QUALCOMM_PROPRIETARY) {\n            return false;\n        }' src/video_core/vulkan_common/vulkan_device.h
           sed -i '/bool IsExtShaderAtomicInt64Supported() const {/a \        const auto driver = GetDriverID();\n        if (driver == VK_DRIVER_ID_QUALCOMM_PROPRIETARY) {\n            return false;\n        }' src/video_core/vulkan_common/vulkan_device.h
-
-          # --- Patch 3: 8 Elite & Cleanup Fixes (vulkan_device.cpp) ---
-          # 3a: Delete the original `device_id` variable declaration.
           sed -i '/const auto device_id =/d' src/video_core/vulkan_common/vulkan_device.cpp
-          
-          # 3b: Replace all usages of the now-deleted `device_id` with its full source path to prevent compile errors.
           sed -i 's/\bdevice_id\b/properties.properties.deviceID/g' src/video_core/vulkan_common/vulkan_device.cpp
-
-          # 3c: This is the corrected logic: Instead of adding a new variable, we use the `driver_id`
-          # variable that already exists in the correct C++ scope. This fixes the compile error.
           sed -i 's/if (is_qualcomm) {/if (driver_id == VK_DRIVER_ID_QUALCOMM_PROPRIETARY) {/' src/video_core/vulkan_common/vulkan_device.cpp
-          
-          echo "All patches applied successfully."
-
-      - name: Setup and Restore Cache
-        uses: actions/cache@v4
-        id: ccache-cache
-        with:
-          path: ${{ env.CCACHE_DIR }}
-          key: ${{ runner.os }}-android-ccache-${{ env.TARGET }}-${{ github.ref_name }}-${{ hashFiles('citron_source/**/CMakeLists.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-android-ccache-${{ env.TARGET }}-${{ github.ref_name }}-
-            ${{ runner.os }}-android-ccache-${{ env.TARGET }}-
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -343,140 +164,54 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq \
-            wget unzip curl git cmake build-essential \
-            pkg-config zip glslang-tools nasm perl \
-            autoconf automake libtool yasm
-
-      - name: Install Android SDK Command-line Tools
+      - name: Install Android SDK & NDK
         run: |
           wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
           unzip -q commandlinetools-linux-11076708_latest.zip
-          mkdir -p android-sdk/cmdline-tools
-          mv cmdline-tools android-sdk/cmdline-tools/latest
-
-      - name: Set up Android Environment Variables
-        run: |
-          echo "ANDROID_HOME=$PWD/android-sdk" >> $GITHUB_ENV
-          echo "$PWD/android-sdk/cmdline-tools/latest/bin" >> $GITHUB_PATH
-
-      - name: Accept Android SDK licenses and install NDK
-        run: |
+          mkdir -p android-sdk/cmdline-tools; mv cmdline-tools android-sdk/cmdline-tools/latest
+          export ANDROID_HOME=$PWD/android-sdk
+          export PATH=$PATH:$ANDROID_HOME/cmdline-tools/latest/bin
           yes | sdkmanager --licenses > /dev/null || true
           sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0" "ndk;26.1.10909125"
+          echo "ANDROID_HOME=$ANDROID_HOME" >> $GITHUB_ENV
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/26.1.10909125" >> $GITHUB_ENV
 
-      - name: Compile Android APK (Snapdragon 8 Elite)
+      - name: Build APK (8 Elite)
         working-directory: ./citron_source/src/android
         run: |
-          # The git command needs to run from the cloned git repo to get the correct commit count
-          COUNT="$(git -C ../.. rev-list --count HEAD)"
-          APK_NAME="Citron-${COUNT}-Android-${MODEL}-${TARGET}"
-          
-          export ANDROID_SDK_ROOT="$ANDROID_HOME"
-          export ANDROID_NDK="$ANDROID_NDK_HOME"
-          chmod +x ./gradlew
-          ./gradlew assembleMainlineRelease \
-            -Pcmake.args="-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DENABLE_UPDATE_CHECKER=ON -DENABLE_QT=OFF -DENABLE_SDL2=OFF -DENABLE_WEB_SERVICE=OFF -DENABLE_OPENSSL=OFF -DCITRON_USE_BUNDLED_VCPKG=ON -DCITRON_USE_BUNDLED_FFMPEG=ON -DCITRON_ENABLE_LTO=ON -DCITRON_BUILD_TYPE=Release"
-          
-          APK_PATH=$(find app/build/outputs/apk -type f -name "*.apk" | head -n 1)
-          if [ -z "$APK_PATH" ]; then
-            echo "::error::Build failed: No APK file was found."
-            exit 1
-          fi
-          
-          mkdir -p artifacts
-          mv "$APK_PATH" "artifacts/$APK_NAME.apk"
+          chmod +x gradlew
+          ./gradlew assembleMainlineRelease -Pcmake.args="-DENABLE_QT=OFF -DENABLE_SDL2=OFF -DENABLE_WEB_SERVICE=OFF -DENABLE_OPENSSL=OFF -DCITRON_USE_BUNDLED_VCPKG=ON -DCITRON_USE_BUNDLED_FFMPEG=ON -DCITRON_ENABLE_LTO=ON -DCITRON_BUILD_TYPE=Release"
 
-      - name: Upload APK artifact
+      - name: Upload APK (8 Elite)
         uses: actions/upload-artifact@v4
         with:
-          name: citron-android-8elite
-          path: citron_source/src/android/artifacts/*.apk
+          name: citron-android-8elite-pr-${{ needs.check-version.outputs.pr_number }}
+          path: citron_source/src/android/app/build/outputs/apk/mainline/release/*.apk
 
-  release-android:
-    name: "Release Android Nightly"
+  comment:
+    name: Comment on PR
     needs: [check-version, build-android, build-android-8elite]
-    if: needs.check-version.outputs.should_build == 'true' && github.ref_name == 'main'
-    permissions:
-      contents: write
+    if: always() && needs.check-version.outputs.pr_number != ''
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Download APK artifacts
-        uses: actions/download-artifact@v4
-        with:
-          pattern: citron-android-*
-          merge-multiple: true
-          path: .
-
-      - name: Get version info for release name
-        shell: bash
-        run: |
-          echo "DATE=$(date +'%Y-%m-%d')" >> $GITHUB_ENV
-          echo "GIT_HASH=${{ needs.build-android.outputs.git_hash }}" >> $GITHUB_ENV
-          echo "BRANCH_NAME=${{ needs.check-version.outputs.branch_name }}" >> $GITHUB_ENV
-
-      - name: Delete previous nightly release and tag
-        run: gh release delete "nightly-android" --repo "${{ github.repository }}" --cleanup-tag -y || true
+      - name: Create Comment
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Create new nightly release
-        uses: softprops/action-gh-release@v2
-        with:
-          name: "Continuous Build: (Android Nightly: ${{ env.GIT_HASH }})"
-          tag_name: "nightly-android"
-          prerelease: true
-          files: "*.apk"
-          body: |
-            **Citron Upstream Commit:** [`${{ needs.check-version.outputs.new_hash }}`](https://github.com/citron-neo/emulator/commit/${{ needs.check-version.outputs.new_hash_full }})
-
-            This build is based on the latest Citron emulator source code from the **${{ env.BRANCH_NAME }}** branch.
-
-            **Build Details:**
-            - Platform: Android (arm64-v8a)
-            - Build Type: Release with LTO enabled
-            - Date: ${{ env.DATE }}
-            - Branch: ${{ env.BRANCH_NAME }}
-            - Includes: Standard build + Snapdragon 8 Elite build with Qualcomm patches
-
-      - name: Update LATEST_VERSION
-        if: success()
+          PR_NUMBER: ${{ needs.check-version.outputs.pr_number }}
+          RUN_ID: ${{ github.run_id }}
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          echo "${{ needs.check-version.outputs.new_hash }}" > LATEST_VERSION
-          git add LATEST_VERSION
-          git commit -m "Update LATEST_VERSION to ${{ needs.check-version.outputs.new_hash }} [skip ci]" || exit 0
-          for i in {1..5}; do
-            git pull --rebase origin main && git push && break || sleep 2
-          done
+          BODY="🤖 **Android Builds for PR #${PR_NUMBER} are ready!**
 
-      - name: Post to Discord
-        if: success()
-        run: |
-          DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/tag/nightly-android"
-          if [ "${{ env.BRANCH_NAME }}" = "feature/android-game-file-extraction" ]; then
-            BRANCH_EMOJI="🍋"
-            BRANCH_DESC="Game File Extraction"
-            EXPERIMENTAL_FEATURES="\n🔬 **New Features:**\n• RomFS dumping support\n• ExeFS dumping support\n• Custom dump location selection"
+          Includes Standard and Snapdragon 8 Elite (Qualcomm optimized) APKs.
+          
+          [Download Artifacts](https://github.com/${{ github.repository }}/actions/runs/${RUN_ID})
+
+          *Check the Actions run for APK files.*"
+          
+          EXISTING_COMMENT=$(gh pr view $PR_NUMBER -R citron-neo/emulator --json comments --jq ".comments[] | select(.body | contains(\"Android Builds for PR #${PR_NUMBER} are ready\")) | .id" | tail -n 1)
+          
+          if [ -n "$EXISTING_COMMENT" ]; then
+            gh api -X PATCH "repos/citron-neo/emulator/issues/comments/$EXISTING_COMMENT" -f body="$BODY"
           else
-            BRANCH_EMOJI="📦"
-            BRANCH_DESC="Main Branch"
-            EXPERIMENTAL_FEATURES=""
+            gh pr comment $PR_NUMBER -R citron-neo/emulator --body "$BODY"
           fi
-          WEBHOOK_URL="${{ secrets.DISCORD_WEBHOOK }}"
-          if [ -z "$WEBHOOK_URL" ]; then
-            echo "DISCORD_WEBHOOK is not set; skipping Discord notification."
-            exit 0
-          fi
-          curl -H "Content-Type: application/json" \
-               -d "{\"content\":\"🤖 **New Android Build Available!**\n\n📦 **Version:** \`${{ env.GIT_HASH }}\`\n📅 **Date:** ${{ env.DATE }}\n$BRANCH_EMOJI **Branch:** $BRANCH_DESC$EXPERIMENTAL_FEATURES\n🔗 **Download:** $DOWNLOAD_URL\"}" \
-               "$WEBHOOK_URL"

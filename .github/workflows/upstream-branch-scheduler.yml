@@ -13,33 +13,36 @@ jobs:
   dispatch-branch-builds:
     runs-on: ubuntu-latest
     steps:
-      - name: Discover upstream branches
+      - name: Discover upstream open PRs
         id: discover
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # Fetch open PRs, including those from forks. 
+          # We store: pr_number, head_ref (branch), head_repo_full_name
           gh api "repos/citron-neo/emulator/pulls?state=open&per_page=100" \
-            --jq '.[] | select(.head.repo.full_name == "citron-neo/emulator") | .head.ref' \
-            | sort -u \
-            > branches.txt
+            --jq '.[] | [.number, .head.ref, .head.repo.full_name] | @tsv' \
+            > prs.tsv
 
-          COUNT=$(wc -l < branches.txt | tr -d ' ')
+          COUNT=$(wc -l < prs.tsv | tr -d ' ')
           echo "count=$COUNT" >> $GITHUB_OUTPUT
-          echo "Discovered $COUNT upstream open PR branches."
+          echo "Discovered $COUNT open PRs."
 
-      - name: Dispatch builds for each branch
+      - name: Dispatch builds for each PR
         if: steps.discover.outputs.count != '0'
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           REPO="${{ github.repository }}"
-          while IFS= read -r BRANCH; do
-            [ -z "$BRANCH" ] && continue
-            echo "Dispatching builds for upstream branch: $BRANCH"
-            gh workflow run build-windows.yml -R "$REPO" --ref main -f target_branch="$BRANCH"
-            gh workflow run build-linux.yml -R "$REPO" --ref main -f target_branch="$BRANCH"
-            gh workflow run build-android.yml -R "$REPO" --ref main -f target_branch="$BRANCH"
-            gh workflow run build-macos.yml -R "$REPO" --ref main -f target_branch="$BRANCH"
-          done < branches.txt
+          while IFS=$'\t' read -r PR_NUMBER BRANCH HEAD_REPO; do
+            [ -z "$PR_NUMBER" ] && continue
+            echo "Dispatching builds for PR #$PR_NUMBER (Branch: $BRANCH from $HEAD_REPO)"
+            
+            # We pass the PR number and the head repo so the build workflow knows where to clone from and where to comment.
+            gh workflow run build-windows.yml -R "$REPO" --ref main -f target_branch="$BRANCH" -f pr_number="$PR_NUMBER" -f head_repo="$HEAD_REPO"
+            gh workflow run build-linux.yml -R "$REPO" --ref main -f target_branch="$BRANCH" -f pr_number="$PR_NUMBER" -f head_repo="$HEAD_REPO"
+            gh workflow run build-android.yml -R "$REPO" --ref main -f target_branch="$BRANCH" -f pr_number="$PR_NUMBER" -f head_repo="$HEAD_REPO"
+            gh workflow run build-macos.yml -R "$REPO" --ref main -f target_branch="$BRANCH" -f pr_number="$PR_NUMBER" -f head_repo="$HEAD_REPO"
+          done < prs.tsv
