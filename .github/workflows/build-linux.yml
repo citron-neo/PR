@@ -1,7 +1,7 @@
 name: Build Citron (Linux)
 
 concurrency:
-  group: build-nightly-${{ inputs.target_branch || github.event.pull_request.head.ref || github.ref }}
+  group: build-linux-${{ inputs.target_branch || github.event.pull_request.head.ref || github.ref }}
   cancel-in-progress: true
 
 on:
@@ -19,38 +19,50 @@ on:
         description: "Upstream citron-neo/emulator branch to build"
         required: false
         type: string
+      pr_number:
+        description: "PR number to comment on"
+        required: false
+        type: string
+      head_repo:
+        description: "Head repo to clone from (e.g. user/emulator)"
+        required: false
+        type: string
 
 jobs:
   check-version:
-    name: Check if new version available
+    name: Check if build needed
     runs-on: ubuntu-latest
     outputs:
       should_build: ${{ steps.compare.outputs.should_build }}
       new_hash: ${{ steps.upstream.outputs.hash_short }}
       new_hash_full: ${{ steps.upstream.outputs.hash_full }}
       branch_name: ${{ steps.upstream.outputs.branch_name }}
+      head_repo: ${{ steps.upstream.outputs.head_repo }}
+      pr_number: ${{ steps.upstream.outputs.pr_number }}
     steps:
       - name: Checkout this repo
         uses: actions/checkout@v4
-
       - name: Get upstream commit hash
         id: upstream
         run: |
-          REPO_URL="https://github.com/citron-neo/emulator.git"
-          if [ -n "${{ inputs.target_branch }}" ]; then
-            CANDIDATE_BRANCH="${{ inputs.target_branch }}"
-          elif [ "${{ github.event_name }}" = "pull_request" ]; then
-            CANDIDATE_BRANCH="${{ github.event.pull_request.head.ref }}"
-          elif [ "${{ github.event_name }}" = "push" ]; then
-            CANDIDATE_BRANCH="${{ github.ref_name }}"
-          else
-            CANDIDATE_BRANCH="main"
+          PR_NUMBER="${{ inputs.pr_number }}"
+          TARGET_BRANCH="${{ inputs.target_branch }}"
+          HEAD_REPO="${{ inputs.head_repo }}"
+
+          if [ -z "$PR_NUMBER" ] && [ "${{ github.event_name }}" = "pull_request" ]; then
+            PR_NUMBER="${{ github.event.pull_request.number }}"
+            TARGET_BRANCH="${{ github.event.pull_request.head.ref }}"
+            HEAD_REPO="${{ github.event.pull_request.head.repo.full_name }}"
           fi
 
-          if [ -n "$CANDIDATE_BRANCH" ] && git ls-remote --heads "$REPO_URL" "$CANDIDATE_BRANCH" | grep -q "$CANDIDATE_BRANCH"; then
-            TARGET_BRANCH="$CANDIDATE_BRANCH"
-            FULL_HASH=$(git ls-remote "$REPO_URL" "refs/heads/$TARGET_BRANCH" | cut -f1 | head -n1)
-          else
+          if [ -z "$HEAD_REPO" ]; then HEAD_REPO="citron-neo/emulator"; fi
+          if [ -z "$TARGET_BRANCH" ]; then TARGET_BRANCH="main"; fi
+
+          REPO_URL="https://github.com/${HEAD_REPO}.git"
+          FULL_HASH=$(git ls-remote "$REPO_URL" "refs/heads/$TARGET_BRANCH" | cut -f1 | head -n1)
+          
+          if [ -z "$FULL_HASH" ]; then
+            REPO_URL="https://github.com/citron-neo/emulator.git"
             TARGET_BRANCH="main"
             FULL_HASH=$(git ls-remote "$REPO_URL" HEAD | cut -f1)
           fi
@@ -59,65 +71,26 @@ jobs:
           echo "branch_name=$TARGET_BRANCH" >> $GITHUB_OUTPUT
           echo "hash_short=$SHORT_HASH" >> $GITHUB_OUTPUT
           echo "hash_full=$FULL_HASH" >> $GITHUB_OUTPUT
-          echo "Upstream hash short: $SHORT_HASH"
-          echo "Upstream hash full:  $FULL_HASH"
+          echo "head_repo=$HEAD_REPO" >> $GITHUB_OUTPUT
+          echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
 
-      - name: Check if branch commit already built
+      - name: Check if already built
         id: built_check
         run: |
-          BRANCH="${{ steps.upstream.outputs.branch_name }}"
           HASH="${{ steps.upstream.outputs.hash_full }}"
           WORKFLOW_FILE="build-linux.yml"
-
-          COUNT=$(gh api "repos/${{ github.repository }}/actions/workflows/${WORKFLOW_FILE}/runs?branch=${BRANCH}&status=success&per_page=100" --jq "[.workflow_runs[] | select(.head_sha == \"${HASH}\") | select(.id != ${{ github.run_id }})] | length")
-
-          if [ "$COUNT" -gt 0 ]; then
-            echo "already_built=true" >> $GITHUB_OUTPUT
-          else
-            echo "already_built=false" >> $GITHUB_OUTPUT
-          fi
+          COUNT=$(gh api "repos/${{ github.repository }}/actions/workflows/${WORKFLOW_FILE}/runs?status=success&per_page=100" --jq "[.workflow_runs[] | select(.head_sha == \"${HASH}\") | select(.id != ${{ github.run_id }})] | length")
+          echo "already_built=$([ "$COUNT" -gt 0 ] && echo true || echo false)" >> $GITHUB_OUTPUT
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Get last built version
-        id: last_built
-        run: |
-          LAST_HASH=$(cat LATEST_VERSION | tr -d '\n' || echo "none")
-          echo "last_hash=$LAST_HASH" >> $GITHUB_OUTPUT
-          echo "Last built hash: $LAST_HASH"
-
-      - name: Check if release exists
-        id: release_check
-        run: |
-          if gh release view nightly-linux --repo "${{ github.repository }}" > /dev/null 2>&1; then
-            echo "exists=true" >> $GITHUB_OUTPUT
-            echo "Release exists"
-          else
-            echo "exists=false" >> $GITHUB_OUTPUT
-            echo "Release does not exist"
-          fi
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        continue-on-error: true
 
       - name: Compare versions
         id: compare
         run: |
-          if [ "${{ steps.built_check.outputs.already_built }}" = "true" ]; then
+          if [ "${{ steps.built_check.outputs.already_built }}" = "true" ] && [ "${{ github.event_name }}" = "schedule" ]; then
             echo "should_build=false" >> $GITHUB_OUTPUT
-            echo "⏭️ Branch commit already built - skipping"
-          elif [ "${{ github.event_name }}" = "push" ] || [ "${{ github.event_name }}" = "pull_request" ] || [ -n "${{ inputs.target_branch }}" ]; then
-            echo "should_build=true" >> $GITHUB_OUTPUT
-            echo "✅ Push/PR event detected - will build"
-          elif [ "${{ steps.upstream.outputs.hash_short }}" != "${{ steps.last_built.outputs.last_hash }}" ]; then
-            echo "should_build=true" >> $GITHUB_OUTPUT
-            echo "✅ New version detected - will build"
-          elif [ "${{ steps.release_check.outputs.exists }}" != "true" ]; then
-            echo "should_build=true" >> $GITHUB_OUTPUT
-            echo "✅ No release exists - will build"
           else
-            echo "should_build=false" >> $GITHUB_OUTPUT
-            echo "⏭️ No changes - skipping build"
+            echo "should_build=true" >> $GITHUB_OUTPUT
           fi
 
   build:
@@ -158,30 +131,9 @@ jobs:
       - name: Clone Citron Source Code
         shell: bash
         run: |
-          REPO_URL="https://github.com/citron-neo/emulator.git"
+          REPO_URL="https://github.com/${{ needs.check-version.outputs.head_repo }}.git"
           TARGET_BRANCH="${{ needs.check-version.outputs.branch_name }}"
-          
-          ATTEMPT=0
-          MAX_ATTEMPTS=999
-
-          while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
-            ATTEMPT=$((ATTEMPT + 1))
-            echo "Attempt $ATTEMPT of $MAX_ATTEMPTS: Cloning branch '$TARGET_BRANCH'..."
-
-            # 1. CRITICAL: Wipe the directory before every attempt
-            rm -rf emulator
-
-            if git clone --recurse-submodules --shallow-submodules --depth 1 -b "$TARGET_BRANCH" "$REPO_URL" emulator; then
-              echo "✅ Clone successful on attempt $ATTEMPT."
-              exit 0
-            fi
-
-            echo "⚠️ Clone failed. Retrying in 15 seconds..."
-            sleep 15
-          done
-
-          echo "❌ Failed to clone after $MAX_ATTEMPTS attempts."
-          exit 1
+          git clone --recurse-submodules --shallow-submodules --depth 1 -b "$TARGET_BRANCH" "$REPO_URL" emulator
 
       - name: Prepare Build Environment
         run: |
@@ -209,8 +161,8 @@ jobs:
         working-directory: ./emulator
         run: |
           GIT_SHA=$(git rev-parse --short HEAD)
-          export APP_VERSION="${GIT_SHA}"
-          export VERSION="${GIT_SHA}"
+          export APP_VERSION="PR-${{ needs.check-version.outputs.pr_number }}-${GIT_SHA}"
+          export VERSION="${APP_VERSION}"
           export ARCH_SUFFIX="${{ matrix.script_suffix }}"
           export DEVEL="true"
           chmod +x ./package-citron.sh
@@ -222,88 +174,30 @@ jobs:
           name: Artifacts${{ matrix.artifact_suffix }}
           path: emulator/dist/
 
-  release:
-    if: ${{ github.ref_name == 'main' }}
-    name: "release"
+  comment:
+    name: Comment on PR
     needs: [check-version, build]
-    permissions:
-      actions: read
-      security-events: write
-      contents: write
+    if: always() && needs.check-version.outputs.pr_number != ''
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout this repository
-        uses: actions/checkout@v4
-
-      - name: Checkout Upstream Repository
-        run: git clone https://github.com/citron-neo/emulator.git upstream_repo
-
-      - name: Set Version
-        id: version
-        working-directory: ./upstream_repo
-        run: echo "sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
-
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          pattern: Artifacts*
-          merge-multiple: true
-          path: .
-
-      - name: Del Previous Release
-        run: gh release delete "nightly-linux" --repo "${GITHUB_REPOSITORY}" --cleanup-tag -y && sleep 5
+      - name: Create Comment
         env:
-          GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
-        continue-on-error: true
-
-      - name: Set Build Date
-        run: echo "BUILD_DATE=$(date +'%Y-%m-%d')" >> $GITHUB_ENV
-
-      - uses: softprops/action-gh-release@v2
-        with:
-          name: "Continuous Build (Linux Nightly: ${{ steps.version.outputs.sha }})"
-          tag_name: "nightly-linux"
-          prerelease: true
-          draft: false
-          generate_release_notes: false
-          make_latest: false
-          files: |
-            *.AppImage*
-            *.tar.zst
-          body: |
-            **Citron Upstream Commit:** [`${{ needs.check-version.outputs.new_hash }}`](https://github.com/citron-neo/emulator/commit/${{ needs.check-version.outputs.new_hash_full }})
-
-            This build is based on the latest Citron emulator source code from the upstream repository.
-
-            **Build Details:**
-            - Platform: Linux (x86_64, x86_64_v3, aarch64)
-            - Format: AppImage + tar.zst packages
-            - Build Type: Release with optimizations
-            - Date: ${{ env.BUILD_DATE }}
-
-      - name: Update LATEST_VERSION
-        if: success()
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ needs.check-version.outputs.pr_number }}
+          RUN_ID: ${{ github.run_id }}
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          echo "${{ steps.version.outputs.sha }}" > LATEST_VERSION
-          git add LATEST_VERSION
-          git commit -m "Update LATEST_VERSION to ${{ steps.version.outputs.sha }} [skip ci]" || exit 0
-          for i in {1..5}; do
-            git pull --rebase origin main && git push && break || sleep 2
-          done
+          BODY="🐧 **Linux Builds for PR #${PR_NUMBER} are ready!**
 
-      - name: Post to Discord
-        if: success()
-        run: |
-          DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/tag/nightly-linux"
-          DATE=$(date +'%Y-%m-%d')
-          WEBHOOK_URL="${{ secrets.DISCORD_WEBHOOK }}"
-          if [ -z "$WEBHOOK_URL" ]; then
-            echo "DISCORD_WEBHOOK is not set; skipping Discord notification."
-            exit 0
+          Includes: x86_64, x86_64_v3, and aarch64 builds.
+          
+          [Download Artifacts](https://github.com/${{ github.repository }}/actions/runs/${RUN_ID})
+
+          *Check the Actions run for AppImage and tar.zst files.*"
+          
+          EXISTING_COMMENT=$(gh pr view $PR_NUMBER -R citron-neo/emulator --json comments --jq ".comments[] | select(.body | contains(\"Linux Builds for PR #${PR_NUMBER} are ready\")) | .id" | tail -n 1)
+          
+          if [ -n "$EXISTING_COMMENT" ]; then
+            gh api -X PATCH "repos/citron-neo/emulator/issues/comments/$EXISTING_COMMENT" -f body="$BODY"
+          else
+            gh pr comment $PR_NUMBER -R citron-neo/emulator --body "$BODY"
           fi
-          curl -H "Content-Type: application/json" \
-               -d "{\"content\":\"🐧 **New Linux Build Available!**\n\n📦 **Version:** \`${{ steps.version.outputs.sha }}\`\n📅 **Date:** ${DATE}\n🔗 **Download:** $DOWNLOAD_URL\n\n✨ Includes x86_64, x86_64_v3 & aarch64 builds!\"}" \
-               "$WEBHOOK_URL"

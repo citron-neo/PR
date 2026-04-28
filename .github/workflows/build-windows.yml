@@ -1,7 +1,7 @@
 name: Build Citron (Windows)
 
 concurrency:
-  group: build-windows-nightly-${{ inputs.target_branch || github.event.pull_request.head.ref || github.ref }}
+  group: build-windows-${{ inputs.target_branch || github.event.pull_request.head.ref || github.ref }}
   cancel-in-progress: true
 
 on:
@@ -19,37 +19,50 @@ on:
         description: "Upstream citron-neo/emulator branch to build"
         required: false
         type: string
+      pr_number:
+        description: "PR number to comment on"
+        required: false
+        type: string
+      head_repo:
+        description: "Head repo to clone from (e.g. user/emulator)"
+        required: false
+        type: string
 
 jobs:
   check-version:
-    name: Check if new version available
+    name: Check if build needed
     runs-on: ubuntu-latest
     outputs:
       should_build: ${{ steps.compare.outputs.should_build }}
       new_hash: ${{ steps.upstream.outputs.hash_short }}
       new_hash_full: ${{ steps.upstream.outputs.hash_full }}
       branch_name: ${{ steps.upstream.outputs.branch_name }}
+      head_repo: ${{ steps.upstream.outputs.head_repo }}
+      pr_number: ${{ steps.upstream.outputs.pr_number }}
     steps:
       - name: Checkout this repo
         uses: actions/checkout@v4
       - name: Get upstream commit hash
         id: upstream
         run: |
-          REPO_URL="https://github.com/citron-neo/emulator.git"
-          if [ -n "${{ inputs.target_branch }}" ]; then
-            CANDIDATE_BRANCH="${{ inputs.target_branch }}"
-          elif [ "${{ github.event_name }}" = "pull_request" ]; then
-            CANDIDATE_BRANCH="${{ github.event.pull_request.head.ref }}"
-          elif [ "${{ github.event_name }}" = "push" ]; then
-            CANDIDATE_BRANCH="${{ github.ref_name }}"
-          else
-            CANDIDATE_BRANCH="main"
+          PR_NUMBER="${{ inputs.pr_number }}"
+          TARGET_BRANCH="${{ inputs.target_branch }}"
+          HEAD_REPO="${{ inputs.head_repo }}"
+
+          if [ -z "$PR_NUMBER" ] && [ "${{ github.event_name }}" = "pull_request" ]; then
+            PR_NUMBER="${{ github.event.pull_request.number }}"
+            TARGET_BRANCH="${{ github.event.pull_request.head.ref }}"
+            HEAD_REPO="${{ github.event.pull_request.head.repo.full_name }}"
           fi
 
-          if [ -n "$CANDIDATE_BRANCH" ] && git ls-remote --heads "$REPO_URL" "$CANDIDATE_BRANCH" | grep -q "$CANDIDATE_BRANCH"; then
-            TARGET_BRANCH="$CANDIDATE_BRANCH"
-            FULL_HASH=$(git ls-remote "$REPO_URL" "refs/heads/$TARGET_BRANCH" | cut -f1 | head -n1)
-          else
+          if [ -z "$HEAD_REPO" ]; then HEAD_REPO="citron-neo/emulator"; fi
+          if [ -z "$TARGET_BRANCH" ]; then TARGET_BRANCH="main"; fi
+
+          REPO_URL="https://github.com/${HEAD_REPO}.git"
+          FULL_HASH=$(git ls-remote "$REPO_URL" "refs/heads/$TARGET_BRANCH" | cut -f1 | head -n1)
+          
+          if [ -z "$FULL_HASH" ]; then
+            REPO_URL="https://github.com/citron-neo/emulator.git"
             TARGET_BRANCH="main"
             FULL_HASH=$(git ls-remote "$REPO_URL" HEAD | cut -f1)
           fi
@@ -58,70 +71,36 @@ jobs:
           echo "branch_name=$TARGET_BRANCH" >> $GITHUB_OUTPUT
           echo "hash_short=$SHORT_HASH" >> $GITHUB_OUTPUT
           echo "hash_full=$FULL_HASH" >> $GITHUB_OUTPUT
+          echo "head_repo=$HEAD_REPO" >> $GITHUB_OUTPUT
+          echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
 
-      - name: Check if branch commit already built
+      - name: Check if already built
         id: built_check
         run: |
-          BRANCH="${{ steps.upstream.outputs.branch_name }}"
           HASH="${{ steps.upstream.outputs.hash_full }}"
           WORKFLOW_FILE="build-windows.yml"
-
-          COUNT=$(gh api "repos/${{ github.repository }}/actions/workflows/${WORKFLOW_FILE}/runs?branch=${BRANCH}&status=success&per_page=100" --jq "[.workflow_runs[] | select(.head_sha == \"${HASH}\") | select(.id != ${{ github.run_id }})] | length")
-
-          if [ "$COUNT" -gt 0 ]; then
-            echo "already_built=true" >> $GITHUB_OUTPUT
-          else
-            echo "already_built=false" >> $GITHUB_OUTPUT
-          fi
+          COUNT=$(gh api "repos/${{ github.repository }}/actions/workflows/${WORKFLOW_FILE}/runs?status=success&per_page=100" --jq "[.workflow_runs[] | select(.head_sha == \"${HASH}\") | select(.id != ${{ github.run_id }})] | length")
+          echo "already_built=$([ "$COUNT" -gt 0 ] && echo true || echo false)" >> $GITHUB_OUTPUT
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - name: Get last built version
-        id: last_built
-        run: |
-          LAST_HASH=$(cat LATEST_VERSION | tr -d '\n' || echo "none")
-          echo "last_hash=$LAST_HASH" >> $GITHUB_OUTPUT
-      - name: Check if release exists
-        id: release_check
-        run: |
-          if gh release view nightly-windows --repo "${{ github.repository }}" > /dev/null 2>&1; then
-            echo "exists=true" >> $GITHUB_OUTPUT
-          else
-            echo "exists=false" >> $GITHUB_OUTPUT
-          fi
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        continue-on-error: true
+
       - name: Compare versions
         id: compare
         run: |
-          if [ "${{ steps.built_check.outputs.already_built }}" = "true" ]; then
+          if [ "${{ steps.built_check.outputs.already_built }}" = "true" ] && [ "${{ github.event_name }}" = "schedule" ]; then
             echo "should_build=false" >> $GITHUB_OUTPUT
-          elif [ "${{ github.event_name }}" = "push" ] || [ "${{ github.event_name }}" = "pull_request" ] || [ -n "${{ inputs.target_branch }}" ]; then
-            echo "should_build=true" >> $GITHUB_OUTPUT
-          elif [ "${{ steps.upstream.outputs.hash_short }}" != "${{ steps.last_built.outputs.last_hash }}" ]; then
-            echo "should_build=true" >> $GITHUB_OUTPUT
-          elif [ "${{ steps.release_check.outputs.exists }}" != "true" ]; then
-            echo "should_build=true" >> $GITHUB_OUTPUT
           else
-            echo "should_build=false" >> $GITHUB_OUTPUT
+            echo "should_build=true" >> $GITHUB_OUTPUT
           fi
 
-  build:
-    name: "Citron Build (Windows - ${{ matrix.arch }})"
+  build-msvc:
+    name: "Citron Build (Windows MSVC - x64)"
     needs: [check-version]
     if: needs.check-version.outputs.should_build == 'true'
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        include:
-          - os: windows-latest
-            arch: x64
-    timeout-minutes: 120
-
+    runs-on: windows-latest
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
       - name: Install Vulkan SDK
         shell: pwsh
         run: |
@@ -133,101 +112,38 @@ jobs:
       - name: Clone Citron Source
         shell: bash
         run: |
-          TARGET_BRANCH="${{ needs.check-version.outputs.branch_name }}"
-          ATTEMPT=0
-          MAX_ATTEMPTS=999
-          while true; do
-            ATTEMPT=$((ATTEMPT + 1))
-            echo "Attempt $ATTEMPT of $MAX_ATTEMPTS: Cloning Citron branch '$TARGET_BRANCH'..."
-            
-            rm -rf citron
-            
-            if git clone --recurse-submodules --shallow-submodules --depth 1 -b "$TARGET_BRANCH" "https://github.com/citron-neo/emulator.git" citron; then
-              echo "Clone successful on attempt $ATTEMPT."
-              break
-            fi
+          REPO_URL="https://github/${{ needs.check-version.outputs.head_repo }}.git"
+          if [[ "${{ needs.check-version.outputs.head_repo }}" != *"/"* ]]; then REPO_URL="https://github.com/citron-neo/emulator.git"; fi
+          git clone --recursive -b "${{ needs.check-version.outputs.branch_name }}" "https://github.com/${{ needs.check-version.outputs.head_repo }}.git" citron
 
-            if [ $ATTEMPT -ge $MAX_ATTEMPTS ]; then
-              echo "Failed after $MAX_ATTEMPTS attempts."
-              exit 1
-            fi
-
-            echo "Clone failed. Retrying in 15 seconds..."
-            sleep 15
-          done
-
-      - name: Ensure vcpkg has full history
-        working-directory: ./citron
-        shell: bash
-        run: |
-          if [ "$(git -C externals/vcpkg rev-parse --is-shallow-repository 2>/dev/null)" = "true" ]; then
-            git -C externals/vcpkg fetch --unshallow --tags
-          fi
-
-      - name: Cache vcpkg and Qt dependencies
+      - name: Cache vcpkg and Qt
         uses: actions/cache@v4
-        id: cache-vcpkg
         with:
           path: |
             ./citron/build
             ~/.vcpkg/archives
             ${{ env.LOCALAPPDATA }}\vcpkg\archives
-          key: vcpkg-qt-cache-${{ matrix.arch }}-${{ runner.os }}-${{ hashFiles('citron/vcpkg.json') }}-${{ hashFiles('citron/externals/vcpkg/.git/HEAD') }}
-          restore-keys: |
-            vcpkg-qt-cache-${{ matrix.arch }}-${{ runner.os }}-${{ hashFiles('citron/vcpkg.json') }}-
-
-      - name: Get Nightly Version
-        id: version
-        working-directory: ./citron
-        shell: bash
-        run: |
-          git fetch --tags
-          VERSION=$(git rev-parse --short HEAD)
-          echo "VERSION=${VERSION}" >> $GITHUB_OUTPUT
+          key: vcpkg-qt-cache-x64-${{ runner.os }}-${{ hashFiles('citron/vcpkg.json') }}
+          restore-keys: vcpkg-qt-cache-x64-${{ runner.os }}-
 
       - name: Configure CMake
         working-directory: ./citron
         shell: cmd
         run: |
-          set ATTEMPT=0
-          :retry_loop
-          set /a ATTEMPT=%ATTEMPT%+1
-          echo Attempt %ATTEMPT%: Configuring CMake and installing dependencies...
+          cmake -B build -S . -G "Visual Studio 17 2022" -A x64 ^
+            -DCITRON_USE_BUNDLED_VCPKG=ON -DCITRON_BUILD_TYPE=Release -DCITRON_ENABLE_LTO=ON ^
+            -DCITRON_USE_BUNDLED_QT=ON -DENABLE_QT6=ON -DCITRON_TESTS=OFF -DUSE_DISCORD_PRESENCE=ON ^
+            -DENABLE_WEB_SERVICE=ON -DENABLE_OPENSSL=ON -DCITRON_USE_AUTO_UPDATER=ON -DCITRON_ENABLE_LIBARCHIVE=ON
 
-          cmake -B build -S . -G "Visual Studio 17 2022" -A ${{ matrix.arch }} ^
-            -DCITRON_USE_BUNDLED_VCPKG=ON ^
-            -DCITRON_BUILD_TYPE=Release ^
-            -DCITRON_ENABLE_LTO=ON ^
-            -DCITRON_USE_BUNDLED_QT=ON ^
-            -DENABLE_QT6=ON ^
-            -DCITRON_TESTS=OFF ^
-            -DUSE_DISCORD_PRESENCE=ON ^
-            -DENABLE_WEB_SERVICE=ON ^
-            -DENABLE_OPENSSL=ON ^
-            -DCITRON_USE_AUTO_UPDATER=ON ^
-            -DCITRON_ENABLE_LIBARCHIVE=ON
-
-          if %ERRORLEVEL% NEQ 0 (
-            if %ATTEMPT% LSS 5 (
-              echo ⚠️ CMake configuration failed. Retrying in 30 seconds...
-              timeout /t 30 /nobreak
-              goto retry_loop
-            ) else (
-              echo ❌ CMake configuration failed after %ATTEMPT% attempts.
-              exit /b 1
-            )
-          )
-          echo ✅ CMake configuration successful.
-          
-      - name: Build Citron
+      - name: Build
         working-directory: ./citron
         shell: cmd
         run: cmake --build build --config Release --parallel
-      - name: Package Windows Build
+
+      - name: Package
         shell: pwsh
         run: |
-          mkdir dist
-          mkdir temp_package
+          mkdir dist; mkdir temp_package
           Get-ChildItem ".\citron\build\bin\Release\" -Recurse | Where-Object { $_.Extension -ne ".pdb" } | ForEach-Object {
             $relativePath = $_.FullName.Replace((Resolve-Path ".\citron\build\bin\Release\").Path, "").TrimStart('\')
             $destPath = Join-Path ".\temp_package" $relativePath
@@ -235,79 +151,72 @@ jobs:
             if (!(Test-Path $destDir)) { New-Item -ItemType Directory -Path $destDir -Force | Out-Null }
             Copy-Item $_.FullName $destPath -Force
           }
-          Compress-Archive -Path ".\temp_package\*" -DestinationPath ".\dist\Citron-windows-nightly-${{ steps.version.outputs.VERSION }}-${{ matrix.arch }}.zip"
-          Remove-Item ".\temp_package" -Recurse -Force
-      - name: Upload Windows Build
+          Compress-Archive -Path ".\temp_package\*" -DestinationPath ".\dist\Citron-PR-${{ needs.check-version.outputs.pr_number }}-MSVC-x64.zip"
+
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: Citron-Windows-Nightly-${{ matrix.arch }}
+          name: Citron-Windows-MSVC
           path: "dist/*.zip"
 
-  release:
-    if: ${{ github.ref_name == 'main' }}
-    name: "Release"
-    needs: [check-version, build]
-    permissions:
-      contents: write
+  build-clangtron:
+    name: "Citron Build (Windows Clangtron - x64)"
+    needs: [check-version]
+    if: needs.check-version.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - name: Clone Citron Source
+        run: git clone "https://github.com/${{ needs.check-version.outputs.head_repo }}.git" citron -b "${{ needs.check-version.outputs.branch_name }}"
+      - name: Setup Clangtron
+        working-directory: ./citron
+        run: |
+          chmod +x build-clangtron-windows.sh
+          ./build-clangtron-windows.sh setup
+          echo "${HOME}/.cache/cpm/llvm-mingw/bin" >> "$GITHUB_PATH"
+      - name: Build
+        working-directory: ./citron
+        run: |
+          export CITRON_BUILD_TYPE=Release
+          ./build-clangtron-windows.sh use --pgo none --lto full
+      - name: Package
+        run: |
+          mkdir dist
+          cd ./citron/build/use-nopgo/bin
+          zip -r "${GITHUB_WORKSPACE}/dist/Citron-PR-${{ needs.check-version.outputs.pr_number }}-Clangtron-x64.zip" .
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: Citron-Windows-Clangtron
+          path: "dist/*.zip"
+
+  comment:
+    name: Comment on PR
+    needs: [check-version, build-msvc, build-clangtron]
+    if: always() && needs.check-version.outputs.pr_number != ''
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: Citron-Windows-Nightly-x64
-          path: .
-      - name: Get Version from Filename
-        shell: bash
-        run: |
-          FILENAME=$(ls Citron-windows-nightly-*-x64.zip)
-          VERSION=${FILENAME#Citron-windows-nightly-}
-          VERSION=${VERSION%-x64.zip}
-          echo "APP_VERSION=${VERSION}" >> $GITHUB_ENV
-      - name: Delete Previous Release
-        run: gh release delete "nightly-windows" --repo "${{ github.repository }}" --cleanup-tag -y || true
+      - name: Create Comment
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - name: Set Build Date
-        run: echo "BUILD_DATE=$(date +'%Y-%m-%d')" >> $GITHUB_ENV
-      - name: Release Artifacts
-        uses: softprops/action-gh-release@v2
-        with:
-          name: "Continuous Build (Windows Nightly: ${{ env.APP_VERSION }})"
-          tag_name: "nightly-windows"
-          prerelease: true
-          files: "*.zip"
-          body: |
-            **Citron Upstream Commit:** [`${{ needs.check-version.outputs.new_hash }}`](https://github.com/citron-neo/emulator/commit/${{ needs.check-version.outputs.new_hash_full }})
-
-            This build is based on the latest Citron emulator source code from the upstream repository.
-
-            **Build Details:**
-            - Platform: Windows (x64)
-            - Build Type: Release with Qt6 and LTO
-            - Date: ${{ env.BUILD_DATE }}
-      - name: Update LATEST_VERSION
-        if: success()
+          PR_NUMBER: ${{ needs.check-version.outputs.pr_number }}
+          RUN_ID: ${{ github.run_id }}
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          echo "${{ env.APP_VERSION }}" > LATEST_VERSION
-          git add LATEST_VERSION
-          git commit -m "Update LATEST_VERSION to ${{ env.APP_VERSION }} [skip ci]" || exit 0
-          for i in {1..5}; do
-            git pull --rebase origin main && git push && break || sleep 2
-          done
+          BODY="🛠️ **Windows Builds for PR #${PR_NUMBER} are ready!**
 
-      - name: Post to Discord
-        if: success()
-        run: |
-          DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/tag/nightly-windows"
-          DATE=$(date +'%Y-%m-%d')
-          WEBHOOK_URL="${{ secrets.DISCORD_WEBHOOK }}"
-          if [ -z "$WEBHOOK_URL" ]; then
-            echo "DISCORD_WEBHOOK is not set; skipping Discord notification."
-            exit 0
+          | Toolchain | Artifact |
+          |-----------|----------|
+          | MSVC | [Download](https://github.com/${{ github.repository }}/actions/runs/${RUN_ID}) |
+          | Clangtron | [Download](https://github.com/${{ github.repository }}/actions/runs/${RUN_ID}) |
+
+          *Check the Actions run for individual zip files.*"
+          
+          # Check if we already commented to avoid spamming
+          EXISTING_COMMENT=$(gh pr view $PR_NUMBER -R citron-neo/emulator --json comments --jq ".comments[] | select(.body | contains(\"Windows Builds for PR #${PR_NUMBER} are ready\")) | .id" | tail -n 1)
+          
+          if [ -n "$EXISTING_COMMENT" ]; then
+            gh api -X PATCH "repos/citron-neo/emulator/issues/comments/$EXISTING_COMMENT" -f body="$BODY"
+          else
+            gh pr comment $PR_NUMBER -R citron-neo/emulator --body "$BODY"
           fi
-          curl -H "Content-Type: application/json" \
-               -d "{\"content\":\"🪟 **New Windows Build Available!**\n\n📦 **Version:** \`${{ env.APP_VERSION }}\`\n📅 **Date:** ${DATE}\n🔗 **Download:** $DOWNLOAD_URL\"}" \
-               "$WEBHOOK_URL"
