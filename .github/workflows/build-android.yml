@@ -82,7 +82,7 @@ jobs:
           COUNT=$(gh api "repos/${{ github.repository }}/actions/workflows/${WORKFLOW_FILE}/runs?status=success&per_page=100" --jq "[.workflow_runs[] | select(.head_sha == \"${HASH}\") | select(.id != ${{ github.run_id }})] | length")
           echo "already_built=$([ "$COUNT" -gt 0 ] && echo true || echo false)" >> $GITHUB_OUTPUT
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.EMULATOR_PR_TOKEN }}
 
       - name: Compare versions
         id: compare
@@ -129,6 +129,8 @@ jobs:
       - name: Build APK
         working-directory: ./citron_source/src/android
         run: |
+          export ANDROID_SDK_ROOT="$ANDROID_HOME"
+          export ANDROID_NDK="$ANDROID_NDK_HOME"
           chmod +x gradlew
           ./gradlew assembleMainlineRelease -Pcmake.args="-DENABLE_QT=OFF -DENABLE_SDL2=OFF -DENABLE_WEB_SERVICE=OFF -DENABLE_OPENSSL=OFF -DCITRON_USE_BUNDLED_VCPKG=ON -DCITRON_USE_BUNDLED_FFMPEG=ON -DCITRON_ENABLE_LTO=ON -DCITRON_BUILD_TYPE=Release"
 
@@ -164,6 +166,11 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq wget unzip curl git cmake build-essential pkg-config zip glslang-tools nasm perl autoconf automake libtool yasm
+
       - name: Install Android SDK & NDK
         run: |
           wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
@@ -179,6 +186,8 @@ jobs:
       - name: Build APK (8 Elite)
         working-directory: ./citron_source/src/android
         run: |
+          export ANDROID_SDK_ROOT="$ANDROID_HOME"
+          export ANDROID_NDK="$ANDROID_NDK_HOME"
           chmod +x gradlew
           ./gradlew assembleMainlineRelease -Pcmake.args="-DENABLE_QT=OFF -DENABLE_SDL2=OFF -DENABLE_WEB_SERVICE=OFF -DENABLE_OPENSSL=OFF -DCITRON_USE_BUNDLED_VCPKG=ON -DCITRON_USE_BUNDLED_FFMPEG=ON -DCITRON_ENABLE_LTO=ON -DCITRON_BUILD_TYPE=Release"
 
@@ -196,7 +205,7 @@ jobs:
     steps:
       - name: Create Comment
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.EMULATOR_PR_TOKEN }}
           PR_NUMBER: ${{ needs.check-version.outputs.pr_number }}
           RUN_ID: ${{ github.run_id }}
         run: |
