@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 env:
-  UPSTREAM_REPO: "cheezwiz7899/emulator" # <--- Change this to switch forks
+  UPSTREAM_REPO: "citron-neo/emulator" # <--- Change this to switch forks
 
 jobs:
   dispatch-branch-builds:
