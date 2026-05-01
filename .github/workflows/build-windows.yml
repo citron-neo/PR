@@ -1,4 +1,4 @@
-﻿name: Build Citron (Windows)
+name: Build Citron (Windows)
 
 concurrency:
   group: build-windows-${{ inputs.target_branch || github.event.pull_request.head.ref || github.ref }}
@@ -63,15 +63,46 @@ jobs:
           echo "head_repo=$HEAD_REPO" >> $GITHUB_OUTPUT
           echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
 
-      - name: Check if already built
+      - name: Check if already built (via PR comment)
         id: built_check
-        run: |
-          HASH="${{ steps.upstream.outputs.hash_full }}"
-          WORKFLOW_FILE="build-windows.yml"
-          COUNT=$(gh api "repos/${{ github.repository }}/actions/workflows/${WORKFLOW_FILE}/runs?status=success&per_page=100" --jq "[.workflow_runs[] | select(.head_sha == \"${HASH}\") | select(.id != ${{ github.run_id }})] | length")
-          echo "already_built=$([ "$COUNT" -gt 0 ] && echo true || echo false)" >> $GITHUB_OUTPUT
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.EMULATOR_PR_TOKEN }}
+        run: |
+          HASH_SHORT="${{ steps.upstream.outputs.hash_short }}"
+          PR_NUMBER="${{ steps.upstream.outputs.pr_number }}"
+          UPSTREAM="${{ env.UPSTREAM_REPO }}"
+          PLATFORM="Windows"
+
+          if [ -z "$GH_TOKEN" ] || [ -z "$PR_NUMBER" ]; then
+            echo "No token or PR number, will build."
+            echo "already_built=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          MARKER="<!-- citron-pr-builds:${PR_NUMBER} -->"
+          COMMENT_BODY=$(gh api "repos/${UPSTREAM}/issues/${PR_NUMBER}/comments?per_page=100" \
+            --jq ".[] | select(.body | contains(\"$MARKER\") or contains(\"Build Artifacts for PR #${PR_NUMBER}\")) | .body" \
+            2>/dev/null | tail -n 1 || echo "")
+
+          if [ -z "$COMMENT_BODY" ]; then
+            echo "No master comment found, will build."
+            echo "already_built=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          PLATFORM_ROW=$(echo "$COMMENT_BODY" | grep "\*\*${PLATFORM}\*\*" || true)
+          echo "Platform row: $PLATFORM_ROW"
+
+          if echo "$PLATFORM_ROW" | grep -qF "$HASH_SHORT"; then
+            if echo "$PLATFORM_ROW" | grep -qE "(\[MSVC\]|\[Clangtron\]|Failed)"; then
+              echo "Commit ${HASH_SHORT} already built or failed for ${PLATFORM}. Skipping."
+              echo "already_built=true" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+          fi
+
+          echo "No conclusive result for commit ${HASH_SHORT} on ${PLATFORM}. Will build."
+          echo "already_built=false" >> $GITHUB_OUTPUT
         continue-on-error: true
 
       - name: Compare versions
