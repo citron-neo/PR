@@ -81,8 +81,8 @@ jobs:
 
           MARKER="<!-- citron-pr-builds:${PR_NUMBER} -->"
           COMMENT_BODY=$(gh api "repos/${UPSTREAM}/issues/${PR_NUMBER}/comments?per_page=100" \
-            --jq ".[] | select(.body | contains(\"$MARKER\") or contains(\"Build Artifacts for PR #${PR_NUMBER}\")) | .body" \
-            2>/dev/null | tail -n 1 || echo "")
+            --jq "[.[] | select(.body | contains(\"$MARKER\") or contains(\"Build Artifacts for PR #${PR_NUMBER}\"))] | last | .body // empty" \
+            2>/dev/null || echo "")
 
           if [ -z "$COMMENT_BODY" ]; then
             echo "No master comment found, will build."
