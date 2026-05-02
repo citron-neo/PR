@@ -258,7 +258,7 @@ jobs:
   comment-end:
     name: Comment End
     needs: [check-version, build]
-    if: always() && needs.check-version.outputs.pr_number != ''
+    if: always() && needs.check-version.outputs.should_build == 'true' && needs.check-version.outputs.pr_number != ''
     runs-on: ubuntu-latest
     steps:
       - name: Update Master Comment (Results)
