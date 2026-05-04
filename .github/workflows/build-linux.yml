@@ -1,7 +1,7 @@
 name: Build Citron (Linux)
 
 concurrency:
-  group: build-linux-${{ inputs.target_branch || github.event.pull_request.head.ref || github.ref }}
+  group: build-linux-${{ inputs.pr_number || inputs.target_branch || github.ref }}
   cancel-in-progress: true
 
 on:
