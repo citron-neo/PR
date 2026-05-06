@@ -172,7 +172,7 @@ jobs:
   build:
     name: "${{ matrix.name }}"
     needs: [check-version, comment-start]
-    if: always() && needs.check-version.outputs.should_build == 'true'
+    if: needs.check-version.outputs.should_build == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     strategy:
@@ -208,8 +208,12 @@ jobs:
         shell: bash
         run: |
           CLONE_REPO="${{ needs.check-version.outputs.head_repo }}"
-          if [[ "$CLONE_REPO" != *"/"* ]]; then CLONE_REPO="${{ env.UPSTREAM_REPO }}"; fi
-          git clone --recurse-submodules --shallow-submodules --depth 1 -b "${{ needs.check-version.outputs.branch_name }}" "https://github.com/${CLONE_REPO}.git" emulator
+          BRANCH_NAME="${{ needs.check-version.outputs.branch_name }}"
+          if [ -z "$CLONE_REPO" ] || [[ "$CLONE_REPO" != *"/"* ]]; then CLONE_REPO="${{ env.UPSTREAM_REPO }}"; fi
+          if [ -z "$BRANCH_NAME" ]; then BRANCH_NAME="main"; fi
+          
+          echo "Cloning from $CLONE_REPO (branch: $BRANCH_NAME)..."
+          git clone --recurse-submodules --shallow-submodules --depth 1 -b "$BRANCH_NAME" "https://github.com/${CLONE_REPO}.git" emulator
 
       - name: Prepare Build Environment
         run: |
