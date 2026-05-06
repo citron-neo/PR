@@ -2,7 +2,6 @@ name: Build Citron (Linux)
 
 concurrency:
   group: build-linux-${{ inputs.pr_number || inputs.target_branch || github.ref }}
-  cancel-in-progress: true
 
 on:
   workflow_dispatch:
@@ -49,14 +48,14 @@ jobs:
 
           REPO_URL="https://github.com/${HEAD_REPO}.git"
           FULL_HASH=$(git ls-remote "$REPO_URL" "refs/heads/$TARGET_BRANCH" | cut -f1 | head -n1)
-          
+
           if [ -z "$FULL_HASH" ]; then
-            REPO_URL="https://github.com/${{ env.UPSTREAM_REPO }}.git"
-            TARGET_BRANCH="main"
-            FULL_HASH=$(git ls-remote "$REPO_URL" HEAD | cut -f1)
+            echo "::error::Could not resolve branch '${TARGET_BRANCH}' in '${HEAD_REPO}'. Refusing to fall back to main."
+            exit 1
           fi
 
           SHORT_HASH=$(echo "$FULL_HASH" | cut -c1-7)
+          echo "Resolved ${HEAD_REPO}@${TARGET_BRANCH} to ${FULL_HASH}"
           echo "branch_name=$TARGET_BRANCH" >> $GITHUB_OUTPUT
           echo "hash_short=$SHORT_HASH" >> $GITHUB_OUTPUT
           echo "hash_full=$FULL_HASH" >> $GITHUB_OUTPUT
@@ -79,6 +78,7 @@ jobs:
             exit 0
           fi
 
+          echo "Checking for HASH_SHORT: $HASH_SHORT"
           MARKER="<!-- citron-pr-builds:${PR_NUMBER} -->"
           COMMENT_BODY=$(gh api "repos/${UPSTREAM}/issues/${PR_NUMBER}/comments?per_page=100" \
             --jq "[.[] | select(.body | contains(\"$MARKER\") or contains(\"Build Artifacts for PR #${PR_NUMBER}\"))] | last | .body // empty" \
@@ -93,10 +93,14 @@ jobs:
           PLATFORM_ROW=$(echo "$COMMENT_BODY" | grep "\*\*${PLATFORM}\*\*" || true)
           echo "Platform row: $PLATFORM_ROW"
 
-          if echo "$PLATFORM_ROW" | grep -qF "$HASH_SHORT"; then
-            if echo "$PLATFORM_ROW" | grep -qE "(\[x86_64\]|\[v3\]|\[ARM\]|Failed)"; then
-              echo "Commit ${HASH_SHORT} already built or failed for ${PLATFORM}. Skipping."
+          if [ -n "$PLATFORM_ROW" ] && echo "$PLATFORM_ROW" | grep -qF "$HASH_SHORT"; then
+            if echo "$PLATFORM_ROW" | grep -qE "(\[x86_64\]|\[v3\]|\[ARM\]|Success|Failed)"; then
+              echo "Commit ${HASH_SHORT} already handled for ${PLATFORM}. Skipping."
               echo "already_built=true" >> $GITHUB_OUTPUT
+              exit 0
+            elif echo "$PLATFORM_ROW" | grep -q "Building..."; then
+              echo "Commit ${HASH_SHORT} is currently building for ${PLATFORM}. Will build again to be safe."
+              echo "already_built=false" >> $GITHUB_OUTPUT
               exit 0
             fi
           fi
@@ -172,7 +176,7 @@ jobs:
   build:
     name: "${{ matrix.name }}"
     needs: [check-version, comment-start]
-    if: needs.check-version.outputs.should_build == 'true'
+    if: always() && needs.check-version.outputs.should_build == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     strategy:
@@ -209,11 +213,19 @@ jobs:
         run: |
           CLONE_REPO="${{ needs.check-version.outputs.head_repo }}"
           BRANCH_NAME="${{ needs.check-version.outputs.branch_name }}"
+          EXPECTED_HASH="${{ needs.check-version.outputs.new_hash_full }}"
           if [ -z "$CLONE_REPO" ] || [[ "$CLONE_REPO" != *"/"* ]]; then CLONE_REPO="${{ env.UPSTREAM_REPO }}"; fi
           if [ -z "$BRANCH_NAME" ]; then BRANCH_NAME="main"; fi
-          
+
           echo "Cloning from $CLONE_REPO (branch: $BRANCH_NAME)..."
           git clone --recurse-submodules --shallow-submodules --depth 1 -b "$BRANCH_NAME" "https://github.com/${CLONE_REPO}.git" emulator
+          cd emulator
+          ACTUAL_HASH=$(git rev-parse HEAD)
+          echo "Checked out ${CLONE_REPO}@${BRANCH_NAME}: ${ACTUAL_HASH}"
+          if [ -n "$EXPECTED_HASH" ] && [ "$ACTUAL_HASH" != "$EXPECTED_HASH" ]; then
+            echo "::error::Checked out ${ACTUAL_HASH}, expected ${EXPECTED_HASH}"
+            exit 1
+          fi
 
       - name: Prepare Build Environment
         run: |
@@ -241,7 +253,14 @@ jobs:
         working-directory: ./emulator
         run: |
           GIT_SHA=$(git rev-parse --short HEAD)
-          export APP_VERSION="PR-${{ needs.check-version.outputs.pr_number }}-${GIT_SHA}"
+          PR_NUMBER="${{ needs.check-version.outputs.pr_number }}"
+          BRANCH_NAME="${{ needs.check-version.outputs.branch_name }}"
+          SAFE_BRANCH=$(printf '%s' "$BRANCH_NAME" | tr '/ ' '--' | tr -cd 'A-Za-z0-9._-')
+          if [ -n "$PR_NUMBER" ]; then
+            export APP_VERSION="PR-${PR_NUMBER}-${GIT_SHA}"
+          else
+            export APP_VERSION="${SAFE_BRANCH:-main}-${GIT_SHA}"
+          fi
           export VERSION="${APP_VERSION}"
           export ARCH_SUFFIX="${{ matrix.script_suffix }}"
           export DEVEL="true"
