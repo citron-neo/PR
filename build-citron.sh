@@ -13,8 +13,12 @@ else
 fi
 
 # --- Source Code Checkout and Versioning ---
-git clone --recurse-submodules --shallow-submodules --depth 1 "https://github.com/citron-neo/emulator.git" ./citron
-cd ./citron
+if [ -d ".git" ]; then
+    echo "Already in a git repository, using current directory."
+else
+    git clone --recurse-submodules --shallow-submodules --depth 1 "https://github.com/citron-neo/emulator.git" ./citron
+    cd ./citron
+fi
 
 if [ "$DEVEL" = 'true' ]; then
     CITRON_TAG="$(git rev-parse --short HEAD)"
