@@ -94,7 +94,7 @@ jobs:
           echo "Platform row: $PLATFORM_ROW"
 
           if [ -n "$PLATFORM_ROW" ] && echo "$PLATFORM_ROW" | grep -qF "$HASH_SHORT"; then
-            if echo "$PLATFORM_ROW" | grep -qE "(\[MSVC\]|\[Clangtron\]|Success|Failed)"; then
+            if echo "$PLATFORM_ROW" | grep -qE "(\[Clangtron\]|Success|Failed)"; then
               echo "Commit ${HASH_SHORT} already handled for ${PLATFORM}. Skipping."
               echo "already_built=true" >> $GITHUB_OUTPUT
               exit 0
@@ -173,83 +173,6 @@ jobs:
           fi
         continue-on-error: true
 
-  build-msvc:
-    name: "Citron Build (Windows MSVC - x64)"
-    needs: [check-version, comment-start]
-    if: always() && needs.check-version.outputs.should_build == 'true'
-    runs-on: windows-latest
-    timeout-minutes: 180
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install Vulkan SDK
-        shell: pwsh
-        run: |
-          $vulkan_sdk_url = "https://sdk.lunarg.com/sdk/download/1.3.283.0/windows/VulkanSDK-1.3.283.0-Installer.exe"
-          Invoke-WebRequest -Uri $vulkan_sdk_url -OutFile VulkanSDK-Installer.exe
-          Start-Process -FilePath ".\VulkanSDK-Installer.exe" -ArgumentList "--accept-licenses", "--default-answer", "--confirm-command", "install" -Wait
-          echo "C:\VulkanSDK\1.3.283.0\Bin" | Out-File -FilePath $env:GITHUB_PATH -Append
-
-      - name: Clone Citron Source
-        shell: bash
-        run: |
-          CLONE_REPO="${{ needs.check-version.outputs.head_repo }}"
-          BRANCH_NAME="${{ needs.check-version.outputs.branch_name }}"
-          EXPECTED_HASH="${{ needs.check-version.outputs.new_hash_full }}"
-          if [ -z "$CLONE_REPO" ] || [[ "$CLONE_REPO" != *"/"* ]]; then CLONE_REPO="${{ env.UPSTREAM_REPO }}"; fi
-          if [ -z "$BRANCH_NAME" ]; then BRANCH_NAME="main"; fi
-          echo "Cloning from $CLONE_REPO (branch: $BRANCH_NAME)..."
-          git clone --recursive -b "$BRANCH_NAME" "https://github.com/${CLONE_REPO}.git" citron
-          cd citron
-          ACTUAL_HASH=$(git rev-parse HEAD)
-          echo "Checked out ${CLONE_REPO}@${BRANCH_NAME}: ${ACTUAL_HASH}"
-          if [ -n "$EXPECTED_HASH" ] && [ "$ACTUAL_HASH" != "$EXPECTED_HASH" ]; then
-            echo "::error::Checked out ${ACTUAL_HASH}, expected ${EXPECTED_HASH}"
-            exit 1
-          fi
-
-      - name: Cache vcpkg and Qt dependencies (MSVC)
-        uses: actions/cache@v4
-        id: cache-vcpkg
-        with:
-          path: |
-            ./citron/build
-            ~/.vcpkg/archives
-            ${{ env.LOCALAPPDATA }}\vcpkg\archives
-          key: vcpkg-qt-cache-x64-${{ runner.os }}-${{ hashFiles('citron/vcpkg.json') }}-${{ hashFiles('citron/externals/vcpkg/.git/HEAD') }}
-          restore-keys: |
-            vcpkg-qt-cache-x64-${{ runner.os }}-${{ hashFiles('citron/vcpkg.json') }}-
-
-      - name: Configure CMake
-        working-directory: ./citron
-        shell: cmd
-        run: |
-          cmake -B build -S . -G "Visual Studio 17 2022" -A x64 ^
-            -DCITRON_USE_BUNDLED_VCPKG=ON -DCITRON_BUILD_TYPE=Release -DCITRON_ENABLE_LTO=ON ^
-            -DCITRON_USE_BUNDLED_QT=ON -DENABLE_QT6=ON -DCITRON_TESTS=OFF -DUSE_DISCORD_PRESENCE=ON ^
-            -DENABLE_WEB_SERVICE=ON -DENABLE_OPENSSL=ON -DCITRON_USE_AUTO_UPDATER=ON -DCITRON_ENABLE_LIBARCHIVE=ON
-
-      - name: Build
-        working-directory: ./citron
-        shell: cmd
-        run: cmake --build build --config Release --parallel --target citron citron-cmd citron-room
-
-      - name: Prepare Package
-        shell: pwsh
-        run: |
-          mkdir temp_package
-          Get-ChildItem ".\citron\build\bin\Release\" -Recurse | Where-Object { $_.Extension -ne ".pdb" } | ForEach-Object {
-            $relativePath = $_.FullName.Replace((Resolve-Path ".\citron\build\bin\Release\").Path, "").TrimStart('\')
-            $destPath = Join-Path ".\temp_package" $relativePath
-            $destDir = Split-Path $destPath -Parent
-            if (!(Test-Path $destDir)) { New-Item -ItemType Directory -Path $destDir -Force | Out-Null }
-            Copy-Item $_.FullName $destPath -Force
-          }
-
-      - name: Upload
-        uses: actions/upload-artifact@v4
-        with:
-          name: Citron-Windows-MSVC
-          path: "temp_package/*"
 
   build-clangtron:
     name: "Citron Build (Windows Clangtron - x64)"
@@ -312,7 +235,7 @@ jobs:
 
   comment-end:
     name: Comment End
-    needs: [check-version, build-msvc, build-clangtron]
+    needs: [check-version, build-clangtron]
     if: always() && needs.check-version.outputs.should_build == 'true' && needs.check-version.outputs.pr_number != ''
     runs-on: ubuntu-latest
     steps:
@@ -326,7 +249,6 @@ jobs:
           HASH_SHORT: ${{ needs.check-version.outputs.new_hash }}
           HASH_FULL: ${{ needs.check-version.outputs.new_hash_full }}
           HEAD_REPO: ${{ needs.check-version.outputs.head_repo }}
-          MSVC_STATUS: ${{ needs.build-msvc.result }}
           CLANG_STATUS: ${{ needs.build-clangtron.result }}
         run: |
           if [ -z "$GH_TOKEN" ]; then echo "EMULATOR_PR_TOKEN not set"; exit 1; fi
@@ -344,10 +266,9 @@ jobs:
             LOG_URL="https://github.com/${REPO}/actions/runs/${RUN_ID}"
             COMMIT_LINK="[\`${HASH_SHORT}\`](https://github.com/${HEAD_REPO}/commit/${HASH_FULL})"
 
-            if [ "$MSVC_STATUS" = "success" ] && [ "$CLANG_STATUS" = "success" ]; then
-              MSVC_URL="https://nightly.link/${REPO}/actions/runs/${RUN_ID}/Citron-Windows-MSVC.zip"
+            if [ "$CLANG_STATUS" = "success" ]; then
               CLANG_URL="https://nightly.link/${REPO}/actions/runs/${RUN_ID}/Citron-Windows-Clangtron.zip"
-              ARTIFACTS="[MSVC](${MSVC_URL}) [Clangtron](${CLANG_URL})"
+              ARTIFACTS="[Clangtron](${CLANG_URL})"
             else
               ARTIFACTS="Failed"
             fi
