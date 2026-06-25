@@ -34,6 +34,7 @@ pacman -Syu --noconfirm --needed \
 	nlohmann-json       \
 	numactl             \
 	openal              \
+	patchelf            \
 	pulseaudio          \
 	pulseaudio-alsa     \
 	qt6-base            \
