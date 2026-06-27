@@ -27,7 +27,6 @@ pacman -Syu --noconfirm --needed \
 	libxss              \
 	lld                 \
 	llvm                \
-	mbedtls2            \
 	mesa                \
 	nasm                \
 	ninja               \
