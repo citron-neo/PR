@@ -205,6 +205,8 @@ jobs:
     steps:
       - name: Checkout CI Scripts
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Clone Citron Source
         shell: bash
