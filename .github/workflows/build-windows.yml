@@ -233,9 +233,58 @@ jobs:
           name: Citron-Windows-Clangtron
           path: "./citron/build/use-nopgo/bin/*"
 
+  build-clang-cl:
+    name: "Citron Build (Windows clang-cl - x64)"
+    needs: [check-version, comment-start]
+    if: always() && needs.check-version.outputs.should_build == 'true'
+    runs-on: windows-2022
+    timeout-minutes: 240
+    env:
+      CPM_SOURCE_CACHE: C:/cpmcache
+    steps:
+      - uses: actions/checkout@v4
+      - name: Clone Citron Source
+        shell: pwsh
+        run: |
+          $repo = "${{ needs.check-version.outputs.head_repo }}"
+          $branch = "${{ needs.check-version.outputs.branch_name }}"
+          $expected = "${{ needs.check-version.outputs.new_hash_full }}"
+          if (-not $repo -or -not $repo.Contains("/")) { $repo = "${{ env.UPSTREAM_REPO }}" }
+          if (-not $branch) { $branch = "main" }
+          git clone --branch $branch "https://github.com/$repo.git" citron
+          $actual = (git -C citron rev-parse HEAD).Trim()
+          if ($expected -and $actual -ne $expected) { throw "Checked out $actual, expected $expected" }
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: CLANG64
+          update: true
+          install: >-
+            base-devel git curl wget
+            mingw-w64-clang-x86_64-nasm
+            mingw-w64-clang-x86_64-yasm
+            mingw-w64-clang-x86_64-glslang
+      - uses: actions/cache@v4
+        with:
+          path: C:/cpmcache
+          key: clang-cl-cache-${{ runner.os }}-${{ hashFiles('citron/CMakeModules/dependencies.cmake', 'citron/build-clangtron-windows.sh') }}
+          restore-keys: clang-cl-cache-${{ runner.os }}-
+      - name: Setup clang-cl
+        shell: msys2 {0}
+        working-directory: ./citron
+        run: ./build-clangtron-windows.sh setup --compiler clang-cl
+      - name: Build clang-cl
+        shell: msys2 {0}
+        working-directory: ./citron
+        run: ./build-clangtron-windows.sh use --compiler clang-cl --pgo none --lto full
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: Citron-Windows-ClangCL
+          path: "./citron/build/clang-cl/use/*"
+
   comment-end:
     name: Comment End
-    needs: [check-version, build-clangtron]
+    needs: [check-version, build-clangtron, build-clang-cl]
     if: always() && needs.check-version.outputs.should_build == 'true' && needs.check-version.outputs.pr_number != ''
     runs-on: ubuntu-latest
     steps:
@@ -250,6 +299,7 @@ jobs:
           HASH_FULL: ${{ needs.check-version.outputs.new_hash_full }}
           HEAD_REPO: ${{ needs.check-version.outputs.head_repo }}
           CLANG_STATUS: ${{ needs.build-clangtron.result }}
+          CLANGCL_STATUS: ${{ needs.build-clang-cl.result }}
         run: |
           if [ -z "$GH_TOKEN" ]; then echo "EMULATOR_PR_TOKEN not set"; exit 1; fi
           MARKER="<!-- citron-pr-builds:${PR_NUMBER} -->"
@@ -271,6 +321,12 @@ jobs:
               ARTIFACTS="[Clangtron](${CLANG_URL})"
             else
               ARTIFACTS="Failed"
+            fi
+            if [ "$CLANGCL_STATUS" = "success" ]; then
+              CLANGCL_URL="https://nightly.link/${REPO}/actions/runs/${RUN_ID}/Citron-Windows-ClangCL.zip"
+              ARTIFACTS="${ARTIFACTS} · [clang-cl](${CLANGCL_URL})"
+            else
+              ARTIFACTS="${ARTIFACTS} · clang-cl Failed"
             fi
 
             export NEW_ROW="| **Windows** | ${COMMIT_LINK} | ${ARTIFACTS} | [Run](${LOG_URL}) |"
