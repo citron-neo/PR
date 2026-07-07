@@ -260,13 +260,6 @@ jobs:
         with:
           msystem: CLANG64
           update: true
-          install: >-
-            base-devel git curl wget
-            mingw-w64-clang-x86_64-nasm
-            mingw-w64-clang-x86_64-yasm
-            mingw-w64-clang-x86_64-glslang
-            mingw-w64-clang-x86_64-ninja
-            mingw-w64-clang-x86_64-sccache
       - uses: actions/cache@v4
         with:
           path: |
