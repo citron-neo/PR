@@ -241,6 +241,8 @@ jobs:
     timeout-minutes: 240
     env:
       CPM_SOURCE_CACHE: C:/cpmcache
+      SCCACHE_DIR: C:/sccache
+      SCCACHE_CACHE_SIZE: 5G
     steps:
       - uses: actions/checkout@v4
       - name: Clone Citron Source
@@ -263,9 +265,13 @@ jobs:
             mingw-w64-clang-x86_64-nasm
             mingw-w64-clang-x86_64-yasm
             mingw-w64-clang-x86_64-glslang
+            mingw-w64-clang-x86_64-ninja
+            mingw-w64-clang-x86_64-sccache
       - uses: actions/cache@v4
         with:
-          path: C:/cpmcache
+          path: |
+            C:/cpmcache
+            C:/sccache
           key: clang-cl-cache-${{ runner.os }}-${{ hashFiles('citron/CMakeModules/dependencies.cmake', 'citron/build-clangtron-windows.sh') }}
           restore-keys: clang-cl-cache-${{ runner.os }}-
       - name: Setup clang-cl
