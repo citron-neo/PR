@@ -180,10 +180,14 @@ jobs:
     if: always() && needs.check-version.outputs.should_build == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 240
+    permissions:
+      contents: read
     env:
       CPM_SOURCE_CACHE: /home/runner/.cache/cpm
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Clone Citron Source
         run: |
           CLONE_REPO="${{ needs.check-version.outputs.head_repo }}"
@@ -239,12 +243,16 @@ jobs:
     if: always() && needs.check-version.outputs.should_build == 'true'
     runs-on: windows-2022
     timeout-minutes: 240
+    permissions:
+      contents: read
     env:
       CPM_SOURCE_CACHE: C:/cpmcache
       SCCACHE_DIR: C:/sccache
       SCCACHE_CACHE_SIZE: 5G
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Clone Citron Source
         shell: pwsh
         run: |
