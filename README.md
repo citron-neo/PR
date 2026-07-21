@@ -30,7 +30,7 @@ Direct links for other information you may need can also be found below:
 
 # READ THIS IF YOU HAVE ISSUES
 
-If you are on wayland (specially GNOME wayland) and get freezes or crashes, you are likely affected by this issue that affects all Qt6 apps: [citron-neo/CI#50](https://github.com/citron-neo/CI/pull/50)
+If you are on wayland (specially GNOME wayland) and get freezes or crashes, you are likely affected by an issue that affects all Qt6 apps.
 
 To fix it simply set the env variable `QT_QPA_PLATFORM=xcb`
 

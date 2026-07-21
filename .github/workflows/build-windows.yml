@@ -283,6 +283,14 @@ jobs:
         shell: msys2 {0}
         working-directory: ./citron
         run: ./build-clangtron-windows.sh use --compiler clang-cl --pgo none --lto full
+      - name: Preserve empty user/ directory for archiving
+        shell: pwsh
+        run: |
+          # actions/upload-artifact drops directories that contain zero files, which would
+          # strip the empty portable-mode "user" folder citron.exe expects next to its exe.
+          # A placeholder file keeps the directory non-empty so it survives upload.
+          "This folder marks a portable installation. Citron stores config and save data here." |
+            Set-Content -Path citron/build/clang-cl/use/user/README.txt
       - name: Upload
         uses: actions/upload-artifact@v4
         with:

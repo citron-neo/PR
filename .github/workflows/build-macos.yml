@@ -185,7 +185,7 @@ jobs:
 
       - name: Install System Dependencies via Homebrew
         run: |
-          brew install ninja boost catch2 cmake enet fmt ffmpeg glslang hidapi libvpx lld llvm nasm nlohmann-json openal-soft sdl2 molten-vk vulkan-headers vulkan-loader webp lz4 zstd openssl@3 pkg-config libusb opus python@3.12
+          brew install ninja boost catch2 cmake enet fmt ffmpeg glslang hidapi libvpx lld llvm nasm nlohmann-json openal-soft sdl2 sdl3 molten-vk vulkan-headers vulkan-loader webp lz4 zstd openssl@3 pkg-config libusb opus python@3.12
 
       - name: Clone Citron Source
         shell: bash
@@ -231,7 +231,7 @@ jobs:
         working-directory: ./citron
         run: |
           OPENAL_DIR="$(brew --prefix openal-soft)"; SDL2_DIR="$(brew --prefix sdl2)"
-          cmake -B build -S . -G "Ninja" -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_PREFIX_PATH="$OPENAL_DIR;$SDL2_DIR" -DCITRON_BUILD_TYPE=Release -DCITRON_USE_FASTER_LD=OFF -DCITRON_USE_BUNDLED_VCPKG=OFF -DENABLE_QT=ON -DCITRON_ENABLE_LTO=ON -DCITRON_TESTS=OFF -DUSE_DISCORD_PRESENCE=ON -DENABLE_WEB_SERVICE=ON -DENABLE_OPENSSL=ON -DENABLE_SDL2=ON -DCITRON_USE_EXTERNAL_SDL2=OFF
+          cmake -B build -S . -G "Ninja" -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_PREFIX_PATH="$OPENAL_DIR;$SDL2_DIR" -DCITRON_BUILD_TYPE=Release -DCITRON_USE_FASTER_LD=OFF -DCITRON_USE_BUNDLED_VCPKG=OFF -DENABLE_QT=ON -DCITRON_ENABLE_LTO=ON -DCITRON_TESTS=OFF -DENABLE_WEB_SERVICE=ON -DENABLE_OPENSSL=ON -DENABLE_SDL2=ON -DCITRON_USE_EXTERNAL_SDL2=OFF
 
       - name: Build Citron
         working-directory: ./citron
@@ -268,8 +268,10 @@ jobs:
           "$MACDEPLOYQT_PATH" "$APP_BUNDLE_PATH" -libpath="$QT_LIB_PATH" -verbose=2 -always-overwrite
 
           FRAMEWORKS_PATH="$APP_BUNDLE_PATH/Contents/Frameworks"
+          EXECUTABLE_PATH="$APP_BUNDLE_PATH/Contents/MacOS/citron"
+          mkdir -p "$FRAMEWORKS_PATH"
 
-          # Create Vulkan ICD json to ensure bundled MoltenVK is used
+          # Create Vulkan ICD json to ensure bundled MoltenVK is used (not homebrew's)
           echo "Setting up Vulkan ICD for bundled MoltenVK..."
           VULKAN_ICD_DIR="$APP_BUNDLE_PATH/Contents/Resources/vulkan/icd.d"
           mkdir -p "$VULKAN_ICD_DIR"
@@ -283,54 +285,103 @@ jobs:
               }
           }
           ICDEOF
+          echo "Created MoltenVK ICD at $VULKAN_ICD_DIR/MoltenVK_icd.json"
 
+          # Copy missing transitive dependencies (like libsharpyuv from webp, liblcms2 from jxl).
+          # Scan the main executable too; macdeployqt can miss non-Qt Homebrew libraries linked by citron.
           echo "Checking for missing transitive dependencies..."
-          copy_missing_deps() {
+          find_bundled_binaries() {
+            printf '%s\n' "$EXECUTABLE_PATH"
             find "$FRAMEWORKS_PATH" -name "*.dylib" -type f | while read -r dylib; do
-              # Handle @rpath/ references
-              otool -L "$dylib" 2>/dev/null | grep -E "^\s+@rpath/" | awk '{print $1}' | sed 's|@rpath/||' | while read -r dep; do
-                if [ ! -f "$FRAMEWORKS_PATH/$dep" ]; then
-                  HOMEBREW_LIB=$(find /opt/homebrew/lib /opt/homebrew/Cellar /usr/local/lib -name "$dep" 2>/dev/null | head -1)
-                  if [ -n "$HOMEBREW_LIB" ] && [ -f "$HOMEBREW_LIB" ]; then
-                    cp "$HOMEBREW_LIB" "$FRAMEWORKS_PATH/"
-                    chmod u+w "$FRAMEWORKS_PATH/$dep"
-                    install_name_tool -id "@rpath/$dep" "$FRAMEWORKS_PATH/$dep" 2>/dev/null || true
-                  fi
-                fi
-              done
-              # Handle absolute homebrew path references
-              otool -L "$dylib" 2>/dev/null | grep -E "^\s+(/opt/homebrew|/usr/local)" | awk '{print $1}' | while read -r abs_dep; do
-                dep_name=$(basename "$abs_dep")
-                if [ ! -f "$FRAMEWORKS_PATH/$dep_name" ] && [ -f "$abs_dep" ]; then
-                  cp "$abs_dep" "$FRAMEWORKS_PATH/"
-                  chmod u+w "$FRAMEWORKS_PATH/$dep_name"
-                  install_name_tool -id "@rpath/$dep_name" "$FRAMEWORKS_PATH/$dep_name" 2>/dev/null || true
-                fi
-              done
+              printf '%s\n' "$dylib"
+            done
+            find "$FRAMEWORKS_PATH" -name "*.framework" -type d | while read -r framework_dir; do
+              framework_name=$(basename "$framework_dir" .framework)
+              framework_binary="$framework_dir/Versions/A/$framework_name"
+              [ ! -f "$framework_binary" ] && framework_binary="$framework_dir/$framework_name"
+              [ -f "$framework_binary" ] && printf '%s\n' "$framework_binary"
             done
           }
-          for i in {1..5}; do copy_missing_deps; done
 
-          EXECUTABLE_PATH="$APP_BUNDLE_PATH/Contents/MacOS/citron"
+          copy_deps_for_binary() {
+            local binary="$1"
+            [ -f "$binary" ] || return 0
+
+            # Handle @rpath/ references
+            otool -L "$binary" 2>/dev/null | grep -E "^\s+@rpath/" | awk '{print $1}' | sed 's|@rpath/||' | while read -r dep; do
+              if [ ! -f "$FRAMEWORKS_PATH/$dep" ]; then
+                HOMEBREW_LIB=$(find /opt/homebrew/lib /opt/homebrew/Cellar /usr/local/lib -name "$dep" 2>/dev/null | head -1)
+                if [ -n "$HOMEBREW_LIB" ] && [ -f "$HOMEBREW_LIB" ]; then
+                  echo "Copying missing @rpath dependency for $(basename "$binary"): $dep"
+                  cp "$HOMEBREW_LIB" "$FRAMEWORKS_PATH/"
+                  chmod u+w "$FRAMEWORKS_PATH/$dep"
+                  install_name_tool -id "@rpath/$dep" "$FRAMEWORKS_PATH/$dep" 2>/dev/null || true
+                fi
+              fi
+            done
+
+            # Handle absolute homebrew path references (critical for portability!)
+            otool -L "$binary" 2>/dev/null | grep -E "^\s+(/opt/homebrew|/usr/local)" | awk '{print $1}' | while read -r abs_dep; do
+              dep_name=$(basename "$abs_dep")
+              if [ ! -f "$FRAMEWORKS_PATH/$dep_name" ] && [ -f "$abs_dep" ]; then
+                echo "Copying missing absolute-path dependency for $(basename "$binary"): $dep_name (from $abs_dep)"
+                cp "$abs_dep" "$FRAMEWORKS_PATH/"
+                chmod u+w "$FRAMEWORKS_PATH/$dep_name"
+                install_name_tool -id "@rpath/$dep_name" "$FRAMEWORKS_PATH/$dep_name" 2>/dev/null || true
+              fi
+            done
+          }
+
+          copy_missing_deps() {
+            find_bundled_binaries | while read -r binary; do
+              copy_deps_for_binary "$binary"
+            done
+          }
+
+          # Run multiple passes to catch nested dependencies
+          for i in 1 2 3 4 5; do
+            echo "Pass $i: checking dependencies..."
+            copy_missing_deps
+          done
+
           install_name_tool -add_rpath "@executable_path/../Frameworks" "$EXECUTABLE_PATH" 2>/dev/null || true
 
-          # Remove absolute rpaths from executable
+          # Remove all hardcoded homebrew/system rpaths from executable - CRITICAL for portability
+          echo "Removing hardcoded rpaths from executable..."
           otool -l "$EXECUTABLE_PATH" | grep -A2 LC_RPATH | grep "path " | awk '{print $2}' | while read -r rpath; do
             case "$rpath" in
-              @executable_path*|@loader_path*|@rpath*) ;;
-              *) install_name_tool -delete_rpath "$rpath" "$EXECUTABLE_PATH" 2>/dev/null || true ;;
+              @executable_path*|@loader_path*|@rpath*)
+                echo "Keeping relative rpath: $rpath"
+                ;;
+              *)
+                echo "Removing absolute rpath: $rpath"
+                install_name_tool -delete_rpath "$rpath" "$EXECUTABLE_PATH" 2>/dev/null || true
+                ;;
             esac
           done
 
           find "$FRAMEWORKS_PATH" -name "*.dylib" -type f | while read -r dylib; do
             dylib_name=$(basename "$dylib")
             install_name_tool -id "@rpath/$dylib_name" "$dylib" 2>/dev/null || true
+            # Rewrite absolute paths to @rpath
             otool -L "$dylib" 2>/dev/null | grep -E "^\s+/" | awk '{print $1}' | while read -r dep; do
               dep_name=$(basename "$dep")
               if [ -f "$FRAMEWORKS_PATH/$dep_name" ]; then
                 install_name_tool -change "$dep" "@rpath/$dep_name" "$dylib" 2>/dev/null || true
               fi
             done
+            # Remove hardcoded rpaths from dylibs - CRITICAL for portability
+            otool -l "$dylib" 2>/dev/null | grep -A2 LC_RPATH | grep "path " | awk '{print $2}' | while read -r rpath; do
+              case "$rpath" in
+                @executable_path*|@loader_path*|@rpath*)
+                  ;;
+                *)
+                  echo "Removing absolute rpath from $dylib_name: $rpath"
+                  install_name_tool -delete_rpath "$rpath" "$dylib" 2>/dev/null || true
+                  ;;
+              esac
+            done
+            # Add @loader_path rpath so dylibs can find their sibling dylibs
             install_name_tool -add_rpath "@loader_path" "$dylib" 2>/dev/null || true
           done
 
@@ -348,8 +399,50 @@ jobs:
             [ -f "$framework_binary" ] && install_name_tool -id "@rpath/$framework_name.framework/Versions/A/$framework_name" "$framework_binary" 2>/dev/null || true
           done
 
+          find_bundled_binaries | while read -r binary; do
+            otool -L "$binary" 2>/dev/null | grep -E "^\s+/" | awk '{print $1}' | while read -r dep; do
+              dep_name=$(basename "$dep")
+              if [ -f "$FRAMEWORKS_PATH/$dep_name" ]; then
+                install_name_tool -change "$dep" "@rpath/$dep_name" "$binary" 2>/dev/null || true
+              fi
+            done
+          done
+
+          # Some SDL3 consumers load "libSDL3.dylib" dynamically at runtime, so it will not
+          # necessarily appear in otool output. Homebrew/macdeployqt may only leave
+          # "libSDL3.0.dylib" in Frameworks, which makes that dlopen path fail.
+          SDL3_BREW_PREFIX="$(brew --prefix sdl3 2>/dev/null || true)"
+          if [ ! -f "$FRAMEWORKS_PATH/libSDL3.dylib" ]; then
+            if [ -n "$SDL3_BREW_PREFIX" ] && [ -f "$SDL3_BREW_PREFIX/lib/libSDL3.dylib" ]; then
+              echo "Copying libSDL3.dylib from Homebrew for runtime dlopen compatibility"
+              cp "$SDL3_BREW_PREFIX/lib/libSDL3.dylib" "$FRAMEWORKS_PATH/libSDL3.dylib"
+            elif [ -f "$FRAMEWORKS_PATH/libSDL3.0.dylib" ]; then
+              echo "Creating libSDL3.dylib from bundled libSDL3.0.dylib for runtime dlopen compatibility"
+              cp "$FRAMEWORKS_PATH/libSDL3.0.dylib" "$FRAMEWORKS_PATH/libSDL3.dylib"
+            fi
+          fi
+          if [ -f "$FRAMEWORKS_PATH/libSDL3.dylib" ]; then
+            chmod u+w "$FRAMEWORKS_PATH/libSDL3.dylib"
+            install_name_tool -id "@rpath/libSDL3.dylib" "$FRAMEWORKS_PATH/libSDL3.dylib" 2>/dev/null || true
+          fi
+
           chmod -R u+w "$APP_BUNDLE_PATH"
           codesign --force --deep -s - "$APP_BUNDLE_PATH"
+          codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE_PATH"
+
+          echo "Final executable SDL dependencies:"
+          otool -L "$EXECUTABLE_PATH" | grep -i SDL || true
+
+          echo "Final executable rpaths:"
+          otool -l "$EXECUTABLE_PATH" | grep -A2 LC_RPATH || true
+
+          echo "Checking for remaining Homebrew library references..."
+          if find_bundled_binaries | while read -r binary; do
+               otool -L "$binary" 2>/dev/null | grep -E "^\s+(/opt/homebrew|/usr/local)" && echo "  in $binary"
+             done | tee /tmp/citron-homebrew-refs.txt; [ -s /tmp/citron-homebrew-refs.txt ]; then
+            echo "::error::Packaged app still contains Homebrew library references."
+            exit 1
+          fi
           hdiutil create -fs HFS+ -srcfolder "$APP_BUNDLE_PATH" -volname "Citron PR Build" "./Citron-macOS.dmg"
           mv *.dmg ./dist/
 
