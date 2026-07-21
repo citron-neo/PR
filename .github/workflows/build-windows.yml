@@ -213,13 +213,6 @@ jobs:
           restore-keys: |
             clangtron-cache-${{ runner.os }}-
 
-      - name: Skip BOLT build (not needed for --pgo none)
-        run: |
-          echo '#!/bin/bash' | sudo tee /usr/local/bin/llvm-bolt-21
-          echo '#!/bin/bash' | sudo tee /usr/local/bin/merge-fdata-21
-          sudo chmod +x /usr/local/bin/llvm-bolt-21
-          sudo chmod +x /usr/local/bin/merge-fdata-21
-
       - name: Setup Clangtron
         working-directory: ./citron
         run: |
